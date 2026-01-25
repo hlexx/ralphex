@@ -13,10 +13,12 @@ var defaultsFS embed.FS
 
 // prompt file names
 const (
-	taskPromptFile         = "task.txt"
-	reviewFirstPromptFile  = "review_first.txt"
-	reviewSecondPromptFile = "review_second.txt"
-	codexPromptFile        = "codex.txt"
+	taskPromptFile              = "task.txt"
+	reviewFirstPromptFile       = "review_first.txt"
+	reviewSecondPromptFile      = "review_second.txt"
+	reviewFirstCodexPromptFile  = "review_first_codex.txt"
+	reviewSecondCodexPromptFile = "review_second_codex.txt"
+	codexPromptFile             = "codex.txt"
 )
 
 // Config holds all configuration settings for ralphex.
@@ -47,10 +49,12 @@ type Config struct {
 	Colors ColorConfig `json:"-"`
 
 	// prompts (loaded separately from files)
-	TaskPrompt         string `json:"-"`
-	ReviewFirstPrompt  string `json:"-"`
-	ReviewSecondPrompt string `json:"-"`
-	CodexPrompt        string `json:"-"`
+	TaskPrompt              string `json:"-"`
+	ReviewFirstPrompt       string `json:"-"`
+	ReviewSecondPrompt      string `json:"-"`
+	ReviewFirstCodexPrompt  string `json:"-"`
+	ReviewSecondCodexPrompt string `json:"-"`
+	CodexPrompt             string `json:"-"`
 
 	// custom agents (loaded separately from files)
 	CustomAgents []CustomAgent `json:"-"`
@@ -162,29 +166,31 @@ func loadWithLocal(globalDir, localDir string) (*Config, error) {
 
 	// assemble config
 	c := &Config{
-		ClaudeCommand:        values.ClaudeCommand,
-		ClaudeArgs:           values.ClaudeArgs,
-		CodexEnabled:         values.CodexEnabled,
-		CodexEnabledSet:      values.CodexEnabledSet,
-		CodexCommand:         values.CodexCommand,
-		CodexModel:           values.CodexModel,
-		CodexReasoningEffort: values.CodexReasoningEffort,
-		CodexTimeoutMs:       values.CodexTimeoutMs,
-		CodexTimeoutMsSet:    values.CodexTimeoutMsSet,
-		CodexSandbox:         values.CodexSandbox,
-		IterationDelayMs:     values.IterationDelayMs,
-		IterationDelayMsSet:  values.IterationDelayMsSet,
-		TaskRetryCount:       values.TaskRetryCount,
-		TaskRetryCountSet:    values.TaskRetryCountSet,
-		PlansDir:             values.PlansDir,
-		Colors:               colors,
-		TaskPrompt:           prompts.Task,
-		ReviewFirstPrompt:    prompts.ReviewFirst,
-		ReviewSecondPrompt:   prompts.ReviewSecond,
-		CodexPrompt:          prompts.Codex,
-		CustomAgents:         agents,
-		configDir:            globalDir,
-		localDir:             localDir,
+		ClaudeCommand:           values.ClaudeCommand,
+		ClaudeArgs:              values.ClaudeArgs,
+		CodexEnabled:            values.CodexEnabled,
+		CodexEnabledSet:         values.CodexEnabledSet,
+		CodexCommand:            values.CodexCommand,
+		CodexModel:              values.CodexModel,
+		CodexReasoningEffort:    values.CodexReasoningEffort,
+		CodexTimeoutMs:          values.CodexTimeoutMs,
+		CodexTimeoutMsSet:       values.CodexTimeoutMsSet,
+		CodexSandbox:            values.CodexSandbox,
+		IterationDelayMs:        values.IterationDelayMs,
+		IterationDelayMsSet:     values.IterationDelayMsSet,
+		TaskRetryCount:          values.TaskRetryCount,
+		TaskRetryCountSet:       values.TaskRetryCountSet,
+		PlansDir:                values.PlansDir,
+		Colors:                  colors,
+		TaskPrompt:              prompts.Task,
+		ReviewFirstPrompt:       prompts.ReviewFirst,
+		ReviewSecondPrompt:      prompts.ReviewSecond,
+		ReviewFirstCodexPrompt:  prompts.ReviewFirstCodex,
+		ReviewSecondCodexPrompt: prompts.ReviewSecondCodex,
+		CodexPrompt:             prompts.Codex,
+		CustomAgents:            agents,
+		configDir:               globalDir,
+		localDir:                localDir,
 	}
 
 	return c, nil

@@ -26,6 +26,7 @@ type opts struct {
 	MaxIterations int  `short:"m" long:"max-iterations" default:"50" description:"maximum task iterations"`
 	Review        bool `short:"r" long:"review" description:"skip task execution, run full review pipeline"`
 	CodexOnly     bool `short:"c" long:"codex-only" description:"skip tasks and first review, run only codex loop"`
+	CodexPrimary  bool `long:"codex-primary" description:"use codex for tasks and reviews (no claude)"`
 	Debug         bool `short:"d" long:"debug" description:"enable debug logging"`
 	NoColor       bool `long:"no-color" description:"disable color output"`
 	Version       bool `short:"v" long:"version" description:"print version and exit"`
@@ -97,9 +98,26 @@ func run(ctx context.Context, o opts) error {
 	// create colors from config (all colors guaranteed populated via fallback)
 	colors := progress.NewColors(cfg.Colors)
 
-	// check dependencies using configured command (or default "claude")
-	if depErr := checkClaudeDep(cfg); depErr != nil {
-		return depErr
+	// check dependencies using configured commands
+	if o.CodexPrimary {
+		if depErr := checkCodexDep(cfg); depErr != nil {
+			return depErr
+		}
+	} else {
+		if depErr := checkClaudeDep(cfg); depErr != nil {
+			return depErr
+		}
+		if o.CodexOnly || cfg.CodexEnabled {
+			if depErr := checkCodexDep(cfg); depErr != nil {
+				return depErr
+			}
+		}
+	}
+
+	if o.CodexPrimary {
+		if cfg.CodexSandbox == "" || cfg.CodexSandbox == "read-only" {
+			return errors.New("codex-primary requires codex_sandbox=full or none (read-only cannot modify files)")
+		}
 	}
 
 	// require running from repo root
@@ -188,6 +206,15 @@ func checkClaudeDep(cfg *config.Config) error {
 	return checkDependencies(claudeCmd)
 }
 
+// checkCodexDep checks that the codex command is available in PATH.
+func checkCodexDep(cfg *config.Config) error {
+	codexCmd := cfg.CodexCommand
+	if codexCmd == "" {
+		codexCmd = "codex"
+	}
+	return checkDependencies(codexCmd)
+}
+
 // determineMode returns the execution mode based on CLI flags.
 func determineMode(o opts) processor.Mode {
 	switch {
@@ -202,22 +229,35 @@ func determineMode(o opts) processor.Mode {
 
 // createRunner creates a processor.Runner with the given configuration.
 func createRunner(cfg *config.Config, o opts, planFile string, mode processor.Mode, log *progress.Logger) *processor.Runner {
+	appCfg := cfg
+	if o.CodexPrimary {
+		cloned := *cfg
+		if cloned.ReviewFirstCodexPrompt != "" {
+			cloned.ReviewFirstPrompt = cloned.ReviewFirstCodexPrompt
+		}
+		if cloned.ReviewSecondCodexPrompt != "" {
+			cloned.ReviewSecondPrompt = cloned.ReviewSecondCodexPrompt
+		}
+		appCfg = &cloned
+	}
+
 	// --codex-only mode forces codex enabled regardless of config
-	codexEnabled := cfg.CodexEnabled
+	codexEnabled := appCfg.CodexEnabled
 	if mode == processor.ModeCodexOnly {
 		codexEnabled = true
 	}
 	return processor.New(processor.Config{
-		PlanFile:         planFile,
-		ProgressPath:     log.Path(),
-		Mode:             mode,
-		MaxIterations:    o.MaxIterations,
-		Debug:            o.Debug,
-		NoColor:          o.NoColor,
-		IterationDelayMs: cfg.IterationDelayMs,
-		TaskRetryCount:   cfg.TaskRetryCount,
-		CodexEnabled:     codexEnabled,
-		AppConfig:        cfg,
+		PlanFile:           planFile,
+		ProgressPath:       log.Path(),
+		Mode:               mode,
+		MaxIterations:      o.MaxIterations,
+		Debug:              o.Debug,
+		NoColor:            o.NoColor,
+		IterationDelayMs:   appCfg.IterationDelayMs,
+		TaskRetryCount:     appCfg.TaskRetryCount,
+		CodexEnabled:       codexEnabled,
+		UseCodexForPrimary: o.CodexPrimary,
+		AppConfig:          appCfg,
 	}, log)
 }
 

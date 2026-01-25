@@ -97,14 +97,22 @@ func (r *Runner) buildTaskPrompt() string {
 // uses the loaded prompt template (user-provided or embedded default).
 // agent references ({{agent:name}}) are expanded via replacePromptVariables.
 func (r *Runner) buildFirstReviewPrompt() string {
-	return r.replacePromptVariables(r.cfg.AppConfig.ReviewFirstPrompt)
+	prompt := r.cfg.AppConfig.ReviewFirstPrompt
+	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewFirstCodexPrompt != "" {
+		prompt = r.cfg.AppConfig.ReviewFirstCodexPrompt
+	}
+	return r.replacePromptVariables(prompt)
 }
 
 // buildSecondReviewPrompt creates the prompt for second review pass - critical/major only.
 // uses the second review prompt loaded from config (either user-provided or embedded default).
 // agent references ({{agent:name}}) are expanded via replacePromptVariables.
 func (r *Runner) buildSecondReviewPrompt() string {
-	return r.replacePromptVariables(r.cfg.AppConfig.ReviewSecondPrompt)
+	prompt := r.cfg.AppConfig.ReviewSecondPrompt
+	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewSecondCodexPrompt != "" {
+		prompt = r.cfg.AppConfig.ReviewSecondCodexPrompt
+	}
+	return r.replacePromptVariables(prompt)
 }
 
 // buildCodexEvaluationPrompt creates the prompt for claude to evaluate codex review output.

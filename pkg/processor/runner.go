@@ -29,16 +29,17 @@ const (
 
 // Config holds runner configuration.
 type Config struct {
-	PlanFile         string         // path to plan file (required for full mode)
-	ProgressPath     string         // path to progress file
-	Mode             Mode           // execution mode
-	MaxIterations    int            // maximum iterations for task phase
-	Debug            bool           // enable debug output
-	NoColor          bool           // disable color output
-	IterationDelayMs int            // delay between iterations in milliseconds
-	TaskRetryCount   int            // number of times to retry failed tasks
-	CodexEnabled     bool           // whether codex review is enabled
-	AppConfig        *config.Config // full application config (for executors and prompts)
+	PlanFile           string         // path to plan file (required for full mode)
+	ProgressPath       string         // path to progress file
+	Mode               Mode           // execution mode
+	MaxIterations      int            // maximum iterations for task phase
+	Debug              bool           // enable debug output
+	NoColor            bool           // disable color output
+	IterationDelayMs   int            // delay between iterations in milliseconds
+	TaskRetryCount     int            // number of times to retry failed tasks
+	CodexEnabled       bool           // whether codex review is enabled
+	UseCodexForPrimary bool           // use codex for tasks and reviews instead of claude
+	AppConfig          *config.Config // full application config (for executors and prompts)
 }
 
 //go:generate moq -out mocks/executor.go -pkg mocks -skip-ensure -fmt goimports . Executor
@@ -71,34 +72,45 @@ type Runner struct {
 
 // New creates a new Runner with the given configuration.
 func New(cfg Config, log Logger) *Runner {
-	// build claude executor with config values
-	claudeExec := &executor.ClaudeExecutor{
-		OutputHandler: func(text string) {
-			log.PrintAligned(text)
-		},
-		Debug: cfg.Debug,
-	}
-	if cfg.AppConfig != nil {
-		claudeExec.Command = cfg.AppConfig.ClaudeCommand
-		claudeExec.Args = cfg.AppConfig.ClaudeArgs
-	}
-
-	// build codex executor with config values
-	codexExec := &executor.CodexExecutor{
-		OutputHandler: func(text string) {
-			log.PrintAligned(text)
-		},
-		Debug: cfg.Debug,
-	}
-	if cfg.AppConfig != nil {
-		codexExec.Command = cfg.AppConfig.CodexCommand
-		codexExec.Model = cfg.AppConfig.CodexModel
-		codexExec.ReasoningEffort = cfg.AppConfig.CodexReasoningEffort
-		codexExec.TimeoutMs = cfg.AppConfig.CodexTimeoutMs
-		codexExec.Sandbox = cfg.AppConfig.CodexSandbox
+	buildClaude := func() Executor {
+		ce := &executor.ClaudeExecutor{
+			OutputHandler: func(text string) {
+				log.PrintAligned(text)
+			},
+			Debug: cfg.Debug,
+		}
+		if cfg.AppConfig != nil {
+			ce.Command = cfg.AppConfig.ClaudeCommand
+			ce.Args = cfg.AppConfig.ClaudeArgs
+		}
+		return ce
 	}
 
-	return NewWithExecutors(cfg, log, claudeExec, codexExec)
+	buildCodex := func() Executor {
+		ce := &executor.CodexExecutor{
+			OutputHandler: func(text string) {
+				log.PrintAligned(text)
+			},
+			Debug: cfg.Debug,
+		}
+		if cfg.AppConfig != nil {
+			ce.Command = cfg.AppConfig.CodexCommand
+			ce.Model = cfg.AppConfig.CodexModel
+			ce.ReasoningEffort = cfg.AppConfig.CodexReasoningEffort
+			ce.TimeoutMs = cfg.AppConfig.CodexTimeoutMs
+			ce.Sandbox = cfg.AppConfig.CodexSandbox
+		}
+		return ce
+	}
+
+	primaryExec := buildClaude()
+	if cfg.UseCodexForPrimary {
+		primaryExec = buildCodex()
+	}
+
+	codexExec := buildCodex()
+
+	return NewWithExecutors(cfg, log, primaryExec, codexExec)
 }
 
 // NewWithExecutors creates a new Runner with custom executors (for testing).

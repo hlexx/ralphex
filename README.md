@@ -151,6 +151,9 @@ ralphex --review docs/plans/feature.md
 # codex-only mode (skip tasks and first claude review)
 ralphex --codex-only
 
+# codex as primary executor (no claude; requires codex_sandbox=full or none)
+ralphex --codex-primary docs/plans/feature.md
+
 # with custom max iterations
 ralphex --max-iterations=100 docs/plans/feature.md
 ```
@@ -162,6 +165,7 @@ ralphex --max-iterations=100 docs/plans/feature.md
 | `-m, --max-iterations` | Maximum task iterations | 50 |
 | `-r, --review` | Skip task execution, run full review pipeline | false |
 | `-c, --codex-only` | Skip tasks and first review, run only codex loop | false |
+| `--codex-primary` | Use codex for tasks and reviews (no claude) | false |
 | `-d, --debug` | Enable debug logging | false |
 | `--no-color` | Disable color output | false |
 

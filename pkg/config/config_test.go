@@ -121,6 +121,8 @@ func TestLoad_PopulatesAllFields(t *testing.T) {
 	assert.NotEmpty(t, cfg.TaskPrompt)
 	assert.NotEmpty(t, cfg.ReviewFirstPrompt)
 	assert.NotEmpty(t, cfg.ReviewSecondPrompt)
+	assert.NotEmpty(t, cfg.ReviewFirstCodexPrompt)
+	assert.NotEmpty(t, cfg.ReviewSecondCodexPrompt)
 	assert.NotEmpty(t, cfg.CodexPrompt)
 }
 
@@ -631,6 +633,8 @@ color_task = #0000ff
 	assert.Equal(t, "global review first", cfg.ReviewFirstPrompt)
 	// embedded defaults (not in local or global)
 	assert.Contains(t, cfg.ReviewSecondPrompt, "{{GOAL}}", "embedded review_second should be used")
+	assert.Contains(t, cfg.ReviewFirstCodexPrompt, "{{GOAL}}", "embedded review_first_codex should be used")
+	assert.Contains(t, cfg.ReviewSecondCodexPrompt, "{{GOAL}}", "embedded review_second_codex should be used")
 	assert.Contains(t, cfg.CodexPrompt, "{{CODEX_OUTPUT}}", "embedded codex should be used")
 
 	// --- verify agents replace behavior (local agents completely replace global) ---
