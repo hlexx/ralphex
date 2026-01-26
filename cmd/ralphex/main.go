@@ -241,9 +241,9 @@ func createRunner(cfg *config.Config, o opts, planFile string, mode processor.Mo
 		appCfg = &cloned
 	}
 
-	// --codex-only mode forces codex enabled regardless of config
+	// --codex-only and --codex-primary force codex enabled regardless of config
 	codexEnabled := appCfg.CodexEnabled
-	if mode == processor.ModeCodexOnly {
+	if mode == processor.ModeCodexOnly || o.CodexPrimary {
 		codexEnabled = true
 	}
 	return processor.New(processor.Config{
