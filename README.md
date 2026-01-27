@@ -151,12 +151,50 @@ ralphex --review docs/plans/feature.md
 # codex-only mode (skip tasks and first claude review)
 ralphex --codex-only
 
-# codex as primary executor (no claude; requires codex_sandbox=full or none)
+# codex as primary executor (no claude; requires codex_sandbox=workspace-write or danger-full-access)
 ralphex --codex-primary docs/plans/feature.md
 
 # with custom max iterations
 ralphex --max-iterations=100 docs/plans/feature.md
 ```
+
+### Codex Primary (no Claude)
+
+To run without Claude Code, use Codex as the primary executor. You must allow a writable sandbox (read-only won't work).
+
+1) Verify Codex CLI is installed and authenticated:
+
+```bash
+codex exec "echo ok"
+```
+
+2) Set a writable sandbox in `~/.config/ralphex/config`:
+
+```ini
+codex_sandbox = workspace-write
+# or: codex_sandbox = danger-full-access
+```
+
+Optional tuning:
+
+```ini
+codex_reasoning_effort = low
+codex_timeout_ms = 300000
+```
+
+3) Run ralphex:
+
+```bash
+# full execution
+ralphex --codex-primary docs/plans/feature.md
+
+# review-only
+ralphex --codex-primary --review
+```
+
+Optional: override codex review prompts via:
+- `~/.config/ralphex/prompts/review_first_codex.txt`
+- `~/.config/ralphex/prompts/review_second_codex.txt`
 
 ### Options
 
