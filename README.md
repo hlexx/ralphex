@@ -368,7 +368,7 @@ project/
 | `codex_model` | Codex model ID | `gpt-5.2-codex` |
 | `codex_reasoning_effort` | Reasoning effort level | `xhigh` |
 | `codex_timeout_ms` | Codex timeout in ms | `3600000` |
-| `codex_sandbox` | Sandbox mode | `read-only` |
+| `codex_sandbox` | Sandbox mode (read-only, workspace-write, danger-full-access) | `read-only` |
 | `iteration_delay_ms` | Delay between iterations | `2000` |
 | `task_retry_count` | Task retry attempts | `1` |
 | `plans_dir` | Plans directory | `docs/plans` |
@@ -417,7 +417,7 @@ No. Git is required for branch management, automatic commits, and diff-based cod
 
 **Should I run ralphex on master or a feature branch?**
 
-For full mode, start on master - ralphex creates a branch automatically from the plan filename. For `--review` mode, switch to your feature branch first - reviews compare against master using `git diff master...HEAD`.
+For full mode, start on your default branch (main/master) - ralphex creates a branch automatically from the plan filename. For `--review` mode, switch to your feature branch first - reviews compare against the repository default branch (origin/HEAD when available).
 
 **How do I restore default agents after customizing?**
 

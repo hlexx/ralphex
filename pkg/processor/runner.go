@@ -435,8 +435,8 @@ The code implements the plan at: %s
 	// different diff command based on iteration
 	var diffInstruction, diffDescription string
 	if isFirst {
-		diffInstruction = "Run: git diff master...HEAD"
-		diffDescription = "code changes between master and HEAD branch"
+		diffInstruction = "Run: git diff $(git symbolic-ref --quiet refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')...HEAD (if empty, use main/master)"
+		diffDescription = "code changes between default branch and HEAD"
 	} else {
 		diffInstruction = "Run: git diff"
 		diffDescription = "uncommitted changes (Claude's fixes from previous iteration)"

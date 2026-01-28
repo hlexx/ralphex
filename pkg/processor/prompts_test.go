@@ -29,7 +29,7 @@ func TestRunner_buildFirstReviewPrompt(t *testing.T) {
 
 		assert.Contains(t, prompt, "docs/plans/test.md")
 		assert.Contains(t, prompt, "progress-test.txt") // progress file should be substituted
-		assert.Contains(t, prompt, "git diff master...HEAD")
+		assert.Contains(t, prompt, "refs/remotes/origin/HEAD")
 		assert.Contains(t, prompt, "<<<RALPHEX:REVIEW_DONE>>>")
 		assert.Contains(t, prompt, "<<<RALPHEX:TASK_FAILED>>>")
 		// verify expanded agent content from the 5 agents
@@ -56,7 +56,7 @@ func TestRunner_buildSecondReviewPrompt(t *testing.T) {
 
 		assert.Contains(t, prompt, "docs/plans/test.md")
 		assert.Contains(t, prompt, "progress-test.txt") // progress file should be substituted
-		assert.Contains(t, prompt, "git diff master...HEAD")
+		assert.Contains(t, prompt, "refs/remotes/origin/HEAD")
 		assert.Contains(t, prompt, "<<<RALPHEX:REVIEW_DONE>>>")
 		assert.Contains(t, prompt, "<<<RALPHEX:TASK_FAILED>>>")
 		// verify expanded agent content from quality and implementation agents
@@ -74,6 +74,28 @@ func TestRunner_buildSecondReviewPrompt(t *testing.T) {
 		assert.Contains(t, prompt, "current branch vs master")
 		assert.Contains(t, prompt, "progress.txt")
 	})
+}
+
+func TestRunner_buildFirstReviewPrompt_CodexPrimary(t *testing.T) {
+	appCfg := &config.Config{
+		ReviewFirstPrompt:      "default first review",
+		ReviewFirstCodexPrompt: "codex first review for {{GOAL}}",
+	}
+	r := &Runner{cfg: Config{PlanFile: "docs/plans/test.md", AppConfig: appCfg, UseCodexForPrimary: true}}
+	prompt := r.buildFirstReviewPrompt()
+
+	assert.Equal(t, "codex first review for implementation of plan at docs/plans/test.md", prompt)
+}
+
+func TestRunner_buildSecondReviewPrompt_CodexPrimary(t *testing.T) {
+	appCfg := &config.Config{
+		ReviewSecondPrompt:      "default second review",
+		ReviewSecondCodexPrompt: "codex second review for {{GOAL}}",
+	}
+	r := &Runner{cfg: Config{PlanFile: "docs/plans/test.md", AppConfig: appCfg, UseCodexForPrimary: true}}
+	prompt := r.buildSecondReviewPrompt()
+
+	assert.Equal(t, "codex second review for implementation of plan at docs/plans/test.md", prompt)
 }
 
 func TestRunner_buildCodexEvaluationPrompt(t *testing.T) {

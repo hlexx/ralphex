@@ -50,8 +50,10 @@ codex_reasoning_effort = xhigh
 codex_timeout_ms = 3600000
 
 # codex_sandbox: sandbox mode for codex execution
-# available: full, read-only, none
+# available: read-only, workspace-write, danger-full-access
 # read-only: codex can read files but not write (safest for code review)
+# workspace-write: codex can write within the project workspace
+# danger-full-access: codex can write anywhere (use with care)
 # default: read-only
 codex_sandbox = read-only
 

@@ -12,8 +12,8 @@ Progress log: {{PROGRESS_FILE}} (contains task execution and previous review ite
 
 Step 1: Get branch context
 Run both commands to understand what changed:
-- `git log master..HEAD --oneline`
-- `git diff master...HEAD`
+- `git log $(git symbolic-ref --quiet refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')..HEAD` (if empty, use main/master)
+- `git diff $(git symbolic-ref --quiet refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')...HEAD` (if empty, use main/master)
 
 Step 2: Review the changes
 Analyze for:

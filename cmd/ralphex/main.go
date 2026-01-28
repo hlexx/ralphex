@@ -115,8 +115,11 @@ func run(ctx context.Context, o opts) error {
 	}
 
 	if o.CodexPrimary {
-		if cfg.CodexSandbox == "" || cfg.CodexSandbox == "read-only" {
-			return errors.New("codex-primary requires codex_sandbox=full or none (read-only cannot modify files)")
+		switch cfg.CodexSandbox {
+		case "workspace-write", "danger-full-access":
+			// ok
+		default:
+			return errors.New("codex-primary requires codex_sandbox=workspace-write or danger-full-access")
 		}
 	}
 
