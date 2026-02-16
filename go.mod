@@ -5,7 +5,7 @@ go 1.25
 require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fatih/color v1.18.0
-	github.com/go-git/go-git/v5 v5.16.4
+	github.com/go-git/go-git/v5 v5.16.5
 	github.com/jessevdk/go-flags v1.6.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/term v0.39.0
