@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +34,9 @@ type opts struct {
 	Review          bool     `short:"r" long:"review" description:"skip task execution, run full review pipeline"`
 	ExternalOnly    bool     `short:"e" long:"external-only" description:"skip tasks and first review, run only external review loop"`
 	CodexOnly       bool     `short:"c" long:"codex-only" description:"alias for --external-only (deprecated)"`
+	CodexPrimary    bool     `long:"codex-primary" description:"use codex for tasks and reviews (no claude)"`
+	CodexModel      string   `long:"codex-model" description:"override codex model for this run"`
+	CodexThinking   string   `long:"codex-thinking" description:"override codex reasoning effort (low, medium, high, xhigh) for this run"`
 	TasksOnly       bool     `short:"t" long:"tasks-only" description:"run only task phase, skip all reviews"`
 	BaseRef         string   `short:"b" long:"base-ref" description:"override default branch for review diffs (branch name or commit hash)"`
 	SkipFinalize    bool     `long:"skip-finalize" description:"skip finalize step even if enabled in config"`
@@ -167,6 +171,10 @@ func run(ctx context.Context, o opts) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if err := normalizeCodexOverrides(&o); err != nil {
+		return err
+	}
+
 	// create colors from config (all colors guaranteed populated via fallback)
 	colors := progress.NewColors(cfg.Colors)
 
@@ -182,9 +190,23 @@ func run(ctx context.Context, o opts) error {
 		return runWatchOnly(ctx, o, cfg, colors)
 	}
 
-	// check dependencies using configured command (or default "claude")
-	if depErr := checkClaudeDep(cfg); depErr != nil {
-		return depErr
+	// check dependencies using configured command(s)
+	if o.CodexPrimary {
+		if depErr := checkCodexDep(cfg); depErr != nil {
+			return depErr
+		}
+	} else {
+		if depErr := checkClaudeDep(cfg); depErr != nil {
+			return depErr
+		}
+	}
+
+	if o.CodexPrimary {
+		switch cfg.CodexSandbox {
+		case "workspace-write", "danger-full-access":
+		default:
+			return errors.New("codex-primary requires codex_sandbox=workspace-write or danger-full-access")
+		}
 	}
 
 	// require running from repo root
@@ -444,6 +466,18 @@ func checkClaudeDep(cfg *config.Config) error {
 	return nil
 }
 
+// checkCodexDep checks that the codex command is available in PATH.
+func checkCodexDep(cfg *config.Config) error {
+	codexCmd := cfg.CodexCommand
+	if codexCmd == "" {
+		codexCmd = "codex"
+	}
+	if _, err := exec.LookPath(codexCmd); err != nil {
+		return fmt.Errorf("%s not found in PATH", codexCmd)
+	}
+	return nil
+}
+
 // isWatchOnlyMode returns true if running in watch-only mode.
 // watch-only mode runs the web dashboard without executing any plan.
 func isWatchOnlyMode(o opts, configWatchDirs []string) bool {
@@ -495,29 +529,78 @@ func validateFlags(o opts) error {
 
 // createRunner creates a processor.Runner with the given configuration.
 func createRunner(req executePlanRequest, o opts, log processor.Logger, holder *status.PhaseHolder) *processor.Runner {
-	// --codex-only mode forces codex enabled regardless of config
-	codexEnabled := req.Config.CodexEnabled
-	if req.Mode == processor.ModeCodexOnly {
+	appCfg := resolveAppConfig(req.Config, o)
+
+	// --codex-only and --codex-primary force codex enabled regardless of config
+	codexEnabled := appCfg.CodexEnabled
+	if req.Mode == processor.ModeCodexOnly || o.CodexPrimary {
 		codexEnabled = true
 	}
 	r := processor.New(processor.Config{
-		PlanFile:         req.PlanFile,
-		ProgressPath:     log.Path(),
-		Mode:             req.Mode,
-		MaxIterations:    o.MaxIterations,
-		Debug:            o.Debug,
-		NoColor:          o.NoColor,
-		IterationDelayMs: req.Config.IterationDelayMs,
-		TaskRetryCount:   req.Config.TaskRetryCount,
-		CodexEnabled:     codexEnabled,
-		FinalizeEnabled:  req.Config.FinalizeEnabled,
-		DefaultBranch:    req.DefaultBranch,
-		AppConfig:        req.Config,
+		PlanFile:           req.PlanFile,
+		ProgressPath:       log.Path(),
+		Mode:               req.Mode,
+		MaxIterations:      o.MaxIterations,
+		Debug:              o.Debug,
+		NoColor:            o.NoColor,
+		IterationDelayMs:   appCfg.IterationDelayMs,
+		TaskRetryCount:     appCfg.TaskRetryCount,
+		CodexEnabled:       codexEnabled,
+		UseCodexForPrimary: o.CodexPrimary,
+		FinalizeEnabled:    req.Config.FinalizeEnabled,
+		DefaultBranch:      req.DefaultBranch,
+		AppConfig:          appCfg,
 	}, log, holder)
 	if req.GitSvc != nil {
 		r.SetGitChecker(req.GitSvc)
 	}
 	return r
+}
+
+func normalizeCodexOverrides(o *opts) error {
+	o.CodexModel = strings.TrimSpace(o.CodexModel)
+	if o.CodexThinking == "" {
+		return nil
+	}
+
+	o.CodexThinking = strings.ToLower(strings.TrimSpace(o.CodexThinking))
+	switch o.CodexThinking {
+	case "low", "medium", "high", "xhigh":
+		return nil
+	default:
+		return fmt.Errorf("invalid --codex-thinking %q, allowed values: low, medium, high, xhigh", o.CodexThinking)
+	}
+}
+
+func resolveAppConfig(cfg *config.Config, o opts) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+
+	needsClone := o.CodexPrimary || o.CodexModel != "" || o.CodexThinking != ""
+	if !needsClone {
+		return cfg
+	}
+
+	cloned := *cfg
+
+	if o.CodexPrimary {
+		if cloned.ReviewFirstCodexPrompt != "" {
+			cloned.ReviewFirstPrompt = cloned.ReviewFirstCodexPrompt
+		}
+		if cloned.ReviewSecondCodexPrompt != "" {
+			cloned.ReviewSecondPrompt = cloned.ReviewSecondCodexPrompt
+		}
+	}
+
+	if o.CodexModel != "" {
+		cloned.CodexModel = o.CodexModel
+	}
+	if o.CodexThinking != "" {
+		cloned.CodexReasoningEffort = o.CodexThinking
+	}
+
+	return &cloned
 }
 
 func printStartupInfo(info startupInfo, colors *progress.Colors) {

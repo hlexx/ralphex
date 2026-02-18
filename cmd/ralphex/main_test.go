@@ -105,6 +105,7 @@ func TestDetermineMode(t *testing.T) {
 		{name: "review_flag", opts: opts{Review: true}, expected: processor.ModeReview},
 		{name: "codex_only_flag", opts: opts{CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "external_only_flag", opts: opts{ExternalOnly: true}, expected: processor.ModeCodexOnly},
+		{name: "codex_primary_keeps_mode_selection", opts: opts{CodexPrimary: true}, expected: processor.ModeFull},
 		{name: "both_external_and_codex_flags", opts: opts{ExternalOnly: true, CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "codex_only_takes_precedence_over_review", opts: opts{Review: true, CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "external_only_takes_precedence_over_review", opts: opts{Review: true, ExternalOnly: true}, expected: processor.ModeCodexOnly},
@@ -384,6 +385,25 @@ func TestCheckClaudeDep(t *testing.T) {
 	})
 }
 
+func TestCheckCodexDep(t *testing.T) {
+	t.Run("uses_configured_command", func(t *testing.T) {
+		cfg := &config.Config{CodexCommand: "nonexistent-codex-12345"}
+		err := checkCodexDep(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nonexistent-codex-12345")
+	})
+
+	t.Run("falls_back_to_codex_when_empty", func(t *testing.T) {
+		cfg := &config.Config{CodexCommand: ""}
+		err := checkCodexDep(cfg)
+		// may pass or fail depending on whether codex is installed
+		// but error message should reference "codex" not empty string
+		if err != nil {
+			assert.Contains(t, err.Error(), "codex")
+		}
+	})
+}
+
 func TestCreateRunner(t *testing.T) {
 	t.Run("creates_runner_without_panic", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -426,6 +446,101 @@ func TestCreateRunner(t *testing.T) {
 		req := executePlanRequest{Mode: processor.ModeCodexOnly, Config: cfg, DefaultBranch: "main"}
 		runner := createRunner(req, o, log, holder)
 		assert.NotNil(t, runner)
+	})
+
+	t.Run("codex_primary_mode_creates_runner_without_panic", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		oldWd, wdErr := os.Getwd()
+		require.NoError(t, wdErr)
+		require.NoError(t, os.Chdir(tmpDir))
+		t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+		cfg := &config.Config{
+			CodexEnabled:            false,
+			ReviewFirstPrompt:       "default first review",
+			ReviewSecondPrompt:      "default second review",
+			ReviewFirstCodexPrompt:  "codex first review",
+			ReviewSecondCodexPrompt: "codex second review",
+		}
+		o := opts{MaxIterations: 50, CodexPrimary: true}
+
+		colors := testColors()
+		holder := &status.PhaseHolder{}
+		log, err := progress.NewLogger(progress.Config{PlanFile: "", Mode: "full", Branch: "test", NoColor: true}, colors, holder)
+		require.NoError(t, err)
+		defer log.Close()
+
+		req := executePlanRequest{PlanFile: "/path/to/plan.md", Mode: processor.ModeFull, Config: cfg, DefaultBranch: "main"}
+		runner := createRunner(req, o, log, holder)
+		assert.NotNil(t, runner)
+	})
+}
+
+func TestNormalizeCodexOverrides(t *testing.T) {
+	t.Run("normalizes_model_and_thinking", func(t *testing.T) {
+		o := opts{
+			CodexModel:    "  gpt-5.3-codex-mini  ",
+			CodexThinking: "  HIGH  ",
+		}
+
+		err := normalizeCodexOverrides(&o)
+		require.NoError(t, err)
+		assert.Equal(t, "gpt-5.3-codex-mini", o.CodexModel)
+		assert.Equal(t, "high", o.CodexThinking)
+	})
+
+	t.Run("accepts_empty_thinking", func(t *testing.T) {
+		o := opts{CodexModel: "  gpt-5.3-codex  "}
+
+		err := normalizeCodexOverrides(&o)
+		require.NoError(t, err)
+		assert.Equal(t, "gpt-5.3-codex", o.CodexModel)
+		assert.Empty(t, o.CodexThinking)
+	})
+
+	t.Run("returns_error_for_invalid_thinking", func(t *testing.T) {
+		o := opts{CodexThinking: "turbo"}
+
+		err := normalizeCodexOverrides(&o)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid --codex-thinking")
+	})
+}
+
+func TestResolveAppConfig(t *testing.T) {
+	base := &config.Config{
+		CodexModel:              "gpt-5.3-codex",
+		CodexReasoningEffort:    "xhigh",
+		ReviewFirstPrompt:       "review_first_default",
+		ReviewSecondPrompt:      "review_second_default",
+		ReviewFirstCodexPrompt:  "review_first_codex",
+		ReviewSecondCodexPrompt: "review_second_codex",
+	}
+
+	t.Run("returns_original_pointer_without_overrides", func(t *testing.T) {
+		resolved := resolveAppConfig(base, opts{})
+		assert.Same(t, base, resolved)
+	})
+
+	t.Run("swaps_review_prompts_for_codex_primary", func(t *testing.T) {
+		resolved := resolveAppConfig(base, opts{CodexPrimary: true})
+
+		assert.Equal(t, "review_first_codex", resolved.ReviewFirstPrompt)
+		assert.Equal(t, "review_second_codex", resolved.ReviewSecondPrompt)
+		assert.Equal(t, "review_first_default", base.ReviewFirstPrompt)
+		assert.Equal(t, "review_second_default", base.ReviewSecondPrompt)
+	})
+
+	t.Run("overrides_codex_model_and_thinking", func(t *testing.T) {
+		resolved := resolveAppConfig(base, opts{
+			CodexModel:    "gpt-5.3-codex-mini",
+			CodexThinking: "high",
+		})
+
+		assert.Equal(t, "gpt-5.3-codex-mini", resolved.CodexModel)
+		assert.Equal(t, "high", resolved.CodexReasoningEffort)
+		assert.Equal(t, "gpt-5.3-codex", base.CodexModel)
+		assert.Equal(t, "xhigh", base.CodexReasoningEffort)
 	})
 }
 

@@ -41,19 +41,20 @@ const (
 
 // Config holds runner configuration.
 type Config struct {
-	PlanFile         string         // path to plan file (required for full mode)
-	PlanDescription  string         // plan description for interactive plan creation mode
-	ProgressPath     string         // path to progress file
-	Mode             Mode           // execution mode
-	MaxIterations    int            // maximum iterations for task phase
-	Debug            bool           // enable debug output
-	NoColor          bool           // disable color output
-	IterationDelayMs int            // delay between iterations in milliseconds
-	TaskRetryCount   int            // number of times to retry failed tasks
-	CodexEnabled     bool           // whether codex review is enabled
-	FinalizeEnabled  bool           // whether finalize step is enabled
-	DefaultBranch    string         // default branch name (detected from repo)
-	AppConfig        *config.Config // full application config (for executors and prompts)
+	PlanFile           string         // path to plan file (required for full mode)
+	PlanDescription    string         // plan description for interactive plan creation mode
+	ProgressPath       string         // path to progress file
+	Mode               Mode           // execution mode
+	MaxIterations      int            // maximum iterations for task phase
+	Debug              bool           // enable debug output
+	NoColor            bool           // disable color output
+	IterationDelayMs   int            // delay between iterations in milliseconds
+	TaskRetryCount     int            // number of times to retry failed tasks
+	CodexEnabled       bool           // whether codex review is enabled
+	UseCodexForPrimary bool           // whether to run primary task/review phases with codex
+	FinalizeEnabled    bool           // whether finalize step is enabled
+	DefaultBranch      string         // default branch name (detected from repo)
+	AppConfig          *config.Config // full application config (for executors and prompts)
 }
 
 //go:generate moq -out mocks/executor.go -pkg mocks -skip-ensure -fmt goimports . Executor
@@ -160,7 +161,12 @@ func New(cfg Config, log Logger, holder *status.PhaseHolder) *Runner {
 		}
 	}
 
-	return NewWithExecutors(cfg, log, claudeExec, codexExec, customExec, holder)
+	primaryExec := Executor(claudeExec)
+	if cfg.UseCodexForPrimary {
+		primaryExec = codexExec
+	}
+
+	return NewWithExecutors(cfg, log, primaryExec, codexExec, customExec, holder)
 }
 
 // NewWithExecutors creates a new Runner with custom executors (for testing).
@@ -238,7 +244,7 @@ func (r *Runner) runFull(ctx context.Context) error {
 	r.phaseHolder.Set(status.PhaseReview)
 	r.log.PrintSection(status.NewGenericSection("claude review 0: all findings"))
 
-	if err := r.runClaudeReview(ctx, r.replacePromptVariables(r.cfg.AppConfig.ReviewFirstPrompt)); err != nil {
+	if err := r.runClaudeReview(ctx, r.buildFirstReviewPrompt()); err != nil {
 		return fmt.Errorf("first review: %w", err)
 	}
 
@@ -262,7 +268,7 @@ func (r *Runner) runReviewOnly(ctx context.Context) error {
 	r.phaseHolder.Set(status.PhaseReview)
 	r.log.PrintSection(status.NewGenericSection("claude review 0: all findings"))
 
-	if err := r.runClaudeReview(ctx, r.replacePromptVariables(r.cfg.AppConfig.ReviewFirstPrompt)); err != nil {
+	if err := r.runClaudeReview(ctx, r.buildFirstReviewPrompt()); err != nil {
 		return fmt.Errorf("first review: %w", err)
 	}
 
@@ -422,7 +428,7 @@ func (r *Runner) runClaudeReviewLoop(ctx context.Context) error {
 		// capture HEAD hash before running claude for no-commit detection
 		headBefore := r.headHash()
 
-		result := r.claude.Run(ctx, r.replacePromptVariables(r.cfg.AppConfig.ReviewSecondPrompt))
+		result := r.claude.Run(ctx, r.buildSecondReviewPrompt())
 		if result.Error != nil {
 			if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
 				return err

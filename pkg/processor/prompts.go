@@ -177,6 +177,26 @@ func (r *Runner) getPlansDir() string {
 	return r.cfg.AppConfig.PlansDir
 }
 
+// buildFirstReviewPrompt creates the prompt for first review pass.
+// uses codex-specific prompt when codex is primary and a codex prompt is available.
+func (r *Runner) buildFirstReviewPrompt() string {
+	prompt := r.cfg.AppConfig.ReviewFirstPrompt
+	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewFirstCodexPrompt != "" {
+		prompt = r.cfg.AppConfig.ReviewFirstCodexPrompt
+	}
+	return r.replacePromptVariables(prompt)
+}
+
+// buildSecondReviewPrompt creates the prompt for second review pass.
+// uses codex-specific prompt when codex is primary and a codex prompt is available.
+func (r *Runner) buildSecondReviewPrompt() string {
+	prompt := r.cfg.AppConfig.ReviewSecondPrompt
+	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewSecondCodexPrompt != "" {
+		prompt = r.cfg.AppConfig.ReviewSecondCodexPrompt
+	}
+	return r.replacePromptVariables(prompt)
+}
+
 // buildCodexEvaluationPrompt creates the prompt for claude to evaluate codex review output.
 // uses the codex prompt loaded from config (either user-provided or embedded default).
 // agent references ({{agent:name}}) are expanded via replacePromptVariables.
