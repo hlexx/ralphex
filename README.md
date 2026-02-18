@@ -403,6 +403,13 @@ ralphex --review docs/plans/feature.md
 # external-only mode (skip tasks and first review, run only external review loop)
 ralphex --external-only
 
+# codex as primary executor for task and review phases (no claude)
+# requires codex_sandbox=workspace-write or danger-full-access
+ralphex --codex-primary docs/plans/feature.md
+
+# codex primary with per-run model/reasoning overrides
+ralphex --codex-primary --codex-model gpt-5.3-codex-mini --codex-thinking high docs/plans/feature.md
+
 # tasks-only mode (run only task phase, skip all reviews)
 ralphex --tasks-only docs/plans/feature.md
 
@@ -431,6 +438,9 @@ ralphex --serve --port 3000 docs/plans/feature.md
 | `-r, --review` | Skip task execution, run full review pipeline | false |
 | `-e, --external-only` | Skip tasks and first review, run only external review loop | false |
 | `-c, --codex-only` | Alias for `--external-only` (deprecated) | false |
+| `--codex-primary` | Use codex for task and review phases instead of claude | false |
+| `--codex-model` | Override codex model for this run | from config |
+| `--codex-thinking` | Override codex reasoning effort (`low`, `medium`, `high`, `xhigh`) for this run | from config |
 | `-t, --tasks-only` | Run only task phase, skip all reviews | false |
 | `-b, --base-ref` | Override default branch for review diffs (branch name or commit hash) | auto-detect |
 | `--skip-finalize` | Skip finalize step even if enabled in config | false |
@@ -554,6 +564,8 @@ The entire system is designed for customization - both task execution and review
 **Prompt files** (`~/.config/ralphex/prompts/`):
 - `task.txt` - task execution prompt
 - `review_first.txt` - comprehensive review (default: 5 language-agnostic agents - quality, implementation, testing, simplification, documentation; customizable)
+- `review_first_codex.txt` - comprehensive review prompt for `--codex-primary`
+- `review_second_codex.txt` - final review prompt for `--codex-primary`
 - `codex.txt` - codex review prompt
 - `review_second.txt` - final review, critical/major issues only (default: 2 agents - quality, implementation; customizable)
 - `finalize.txt` - optional finalize step prompt (disabled by default)
