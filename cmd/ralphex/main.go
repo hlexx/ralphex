@@ -171,7 +171,8 @@ func run(ctx context.Context, o opts) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	if err := normalizeCodexOverrides(&o); err != nil {
+	err = normalizeCodexOverrides(&o)
+	if err != nil {
 		return err
 	}
 
@@ -190,23 +191,8 @@ func run(ctx context.Context, o opts) error {
 		return runWatchOnly(ctx, o, cfg, colors)
 	}
 
-	// check dependencies using configured command(s)
-	if o.CodexPrimary {
-		if depErr := checkCodexDep(cfg); depErr != nil {
-			return depErr
-		}
-	} else {
-		if depErr := checkClaudeDep(cfg); depErr != nil {
-			return depErr
-		}
-	}
-
-	if o.CodexPrimary {
-		switch cfg.CodexSandbox {
-		case "workspace-write", "danger-full-access":
-		default:
-			return errors.New("codex-primary requires codex_sandbox=workspace-write or danger-full-access")
-		}
+	if err := validatePrimaryExecutor(o, cfg); err != nil {
+		return err
 	}
 
 	// require running from repo root
@@ -476,6 +462,22 @@ func checkCodexDep(cfg *config.Config) error {
 		return fmt.Errorf("%s not found in PATH", codexCmd)
 	}
 	return nil
+}
+
+// validatePrimaryExecutor checks primary-executor runtime requirements.
+func validatePrimaryExecutor(o opts, cfg *config.Config) error {
+	if o.CodexPrimary {
+		if err := checkCodexDep(cfg); err != nil {
+			return err
+		}
+		switch cfg.CodexSandbox {
+		case "workspace-write", "danger-full-access":
+		default:
+			return errors.New("codex-primary requires codex_sandbox=workspace-write or danger-full-access")
+		}
+		return nil
+	}
+	return checkClaudeDep(cfg)
 }
 
 // isWatchOnlyMode returns true if running in watch-only mode.
