@@ -133,6 +133,8 @@ type Config struct {
 }
 
 // NewLogger creates a logger writing to both a progress file and stdout.
+// if the progress file already exists with content, existing log is preserved
+// and a restart separator is written instead of a full header.
 // colors must be provided (created via NewColors from config).
 // holder is the shared PhaseHolder for reading the current execution phase.
 func NewLogger(cfg Config, colors *Colors, holder *status.PhaseHolder) (*Logger, error) {
@@ -150,18 +152,31 @@ func NewLogger(cfg Config, colors *Colors, holder *status.PhaseHolder) (*Logger,
 		}
 	}
 
-	f, err := os.Create(progressPath) //nolint:gosec // path derived from plan filename
+	f, err := os.OpenFile(progressPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // path derived from plan filename
 	if err != nil {
-		return nil, fmt.Errorf("create progress file: %w", err)
+		return nil, fmt.Errorf("open progress file: %w", err)
 	}
 
-	// acquire exclusive lock on progress file to signal active session
-	// the lock is held for the duration of execution and released on Close()
-	if err := lockFile(f); err != nil {
+	// acquire exclusive lock on progress file to signal active session.
+	// the lock is held for the duration of execution and released on Close().
+	// lock MUST be acquired before stat to avoid TOCTOU race:
+	// without this ordering, a concurrent process could stat size==0, block on lock,
+	// then write a full header instead of restart separator after another process already wrote content.
+	if lockErr := lockFile(f); lockErr != nil {
 		f.Close()
-		return nil, fmt.Errorf("acquire file lock: %w", err)
+		return nil, fmt.Errorf("acquire file lock: %w", lockErr)
 	}
 	registerActiveLock(f.Name())
+
+	// check if file already has content (restart case) — safe after lock acquisition
+	fi, err := f.Stat()
+	if err != nil {
+		_ = unlockFile(f)
+		unregisterActiveLock(f.Name())
+		f.Close()
+		return nil, fmt.Errorf("stat progress file: %w", err)
+	}
+	restart := fi.Size() > 0
 
 	l := &Logger{
 		file:      f,
@@ -171,17 +186,22 @@ func NewLogger(cfg Config, colors *Colors, holder *status.PhaseHolder) (*Logger,
 		colors:    colors,
 	}
 
-	// write header
-	planStr := cfg.PlanFile
-	if planStr == "" {
-		planStr = "(no plan - review only)"
+	if restart {
+		// write restart separator (matches sectionRegex in web parser)
+		l.writeFile("\n\n--- restarted at %s ---\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	} else {
+		// write full header for new file
+		planStr := cfg.PlanFile
+		if planStr == "" {
+			planStr = "(no plan - review only)"
+		}
+		l.writeFile("# Ralphex Progress Log\n")
+		l.writeFile("Plan: %s\n", planStr)
+		l.writeFile("Branch: %s\n", cfg.Branch)
+		l.writeFile("Mode: %s\n", cfg.Mode)
+		l.writeFile("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		l.writeFile("%s\n\n", strings.Repeat("-", 60))
 	}
-	l.writeFile("# Ralphex Progress Log\n")
-	l.writeFile("Plan: %s\n", planStr)
-	l.writeFile("Branch: %s\n", cfg.Branch)
-	l.writeFile("Mode: %s\n", cfg.Mode)
-	l.writeFile("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	l.writeFile("%s\n\n", strings.Repeat("-", 60))
 
 	return l, nil
 }
