@@ -31,6 +31,8 @@ func Test_defaultsFS_PromptFiles(t *testing.T) {
 		{file: "defaults/prompts/task.txt", contains: []string{"{{PLAN_FILE}}", "{{PROGRESS_FILE}}", "RALPHEX:ALL_TASKS_DONE", "RALPHEX:TASK_FAILED"}},
 		{file: "defaults/prompts/review_first.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:testing}}"}},
 		{file: "defaults/prompts/review_second.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:implementation}}"}},
+		{file: "defaults/prompts/review_first_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE"}},
+		{file: "defaults/prompts/review_second_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE"}},
 		{file: "defaults/prompts/codex.txt", contains: []string{"{{CODEX_OUTPUT}}", "RALPHEX:CODEX_REVIEW_DONE", "Codex reviewed"}},
 	}
 
@@ -54,6 +56,8 @@ func Test_defaultsFS_AllFilesPresent(t *testing.T) {
 		"defaults/prompts/task.txt",
 		"defaults/prompts/review_first.txt",
 		"defaults/prompts/review_second.txt",
+		"defaults/prompts/review_first_codex.txt",
+		"defaults/prompts/review_second_codex.txt",
 		"defaults/prompts/codex.txt",
 	}
 
@@ -121,6 +125,8 @@ func TestLoad_PopulatesAllFields(t *testing.T) {
 	assert.NotEmpty(t, cfg.TaskPrompt)
 	assert.NotEmpty(t, cfg.ReviewFirstPrompt)
 	assert.NotEmpty(t, cfg.ReviewSecondPrompt)
+	assert.NotEmpty(t, cfg.ReviewFirstCodexPrompt)
+	assert.NotEmpty(t, cfg.ReviewSecondCodexPrompt)
 	assert.NotEmpty(t, cfg.CodexPrompt)
 }
 

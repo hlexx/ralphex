@@ -38,11 +38,13 @@ codex_command = codex
 # codex_model: model ID for codex
 # available models: gpt-5.3-codex, gpt-5.3-codex-mini, gpt-5.2-codex
 # default: gpt-5.3-codex
+# can be overridden at runtime with: --codex-model <model-id>
 codex_model = gpt-5.3-codex
 
 # codex_reasoning_effort: reasoning effort level for codex
 # available: low, medium, high, xhigh
 # default: xhigh
+# can be overridden at runtime with: --codex-thinking <level>
 codex_reasoning_effort = xhigh
 
 # codex_timeout_ms: timeout for codex execution in milliseconds
@@ -52,6 +54,7 @@ codex_timeout_ms = 3600000
 # codex_sandbox: sandbox mode for codex execution
 # available: read-only, workspace-write, danger-full-access
 # read-only: codex can read files but not write (safest for code review)
+# for --codex-primary, set to workspace-write or danger-full-access
 # note: in docker, sandbox is auto-disabled (landlock doesn't work in containers)
 # default: read-only
 codex_sandbox = read-only

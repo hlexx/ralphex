@@ -15,14 +15,16 @@ var defaultsFS embed.FS
 
 // prompt file names
 const (
-	taskPromptFile         = "task.txt"
-	reviewFirstPromptFile  = "review_first.txt"
-	reviewSecondPromptFile = "review_second.txt"
-	codexPromptFile        = "codex.txt"
-	makePlanPromptFile     = "make_plan.txt"
-	finalizePromptFile     = "finalize.txt"
-	customReviewPromptFile = "custom_review.txt"
-	customEvalPromptFile   = "custom_eval.txt"
+	taskPromptFile              = "task.txt"
+	reviewFirstPromptFile       = "review_first.txt"
+	reviewSecondPromptFile      = "review_second.txt"
+	reviewFirstCodexPromptFile  = "review_first_codex.txt"
+	reviewSecondCodexPromptFile = "review_second_codex.txt"
+	codexPromptFile             = "codex.txt"
+	makePlanPromptFile          = "make_plan.txt"
+	finalizePromptFile          = "finalize.txt"
+	customReviewPromptFile      = "custom_review.txt"
+	customEvalPromptFile        = "custom_eval.txt"
 )
 
 // Config holds all configuration settings for ralphex.
@@ -75,14 +77,16 @@ type Config struct {
 	Colors ColorConfig `json:"-"`
 
 	// prompts (loaded separately from files)
-	TaskPrompt         string `json:"-"`
-	ReviewFirstPrompt  string `json:"-"`
-	ReviewSecondPrompt string `json:"-"`
-	CodexPrompt        string `json:"-"`
-	MakePlanPrompt     string `json:"-"`
-	FinalizePrompt     string `json:"-"`
-	CustomReviewPrompt string `json:"-"`
-	CustomEvalPrompt   string `json:"-"`
+	TaskPrompt              string `json:"-"`
+	ReviewFirstPrompt       string `json:"-"`
+	ReviewSecondPrompt      string `json:"-"`
+	ReviewFirstCodexPrompt  string `json:"-"`
+	ReviewSecondCodexPrompt string `json:"-"`
+	CodexPrompt             string `json:"-"`
+	MakePlanPrompt          string `json:"-"`
+	FinalizePrompt          string `json:"-"`
+	CustomReviewPrompt      string `json:"-"`
+	CustomEvalPrompt        string `json:"-"`
 
 	// custom agents (loaded separately from files)
 	CustomAgents []CustomAgent `json:"-"`
@@ -264,18 +268,20 @@ func loadConfigFromDirs(globalDir, localDir string) (*Config, error) {
 			WebhookURLs:   values.NotifyWebhookURLs,
 			CustomScript:  values.NotifyCustomScript,
 		},
-		Colors:             colors,
-		TaskPrompt:         prompts.Task,
-		ReviewFirstPrompt:  prompts.ReviewFirst,
-		ReviewSecondPrompt: prompts.ReviewSecond,
-		CodexPrompt:        prompts.Codex,
-		MakePlanPrompt:     prompts.MakePlan,
-		FinalizePrompt:     prompts.Finalize,
-		CustomReviewPrompt: prompts.CustomReview,
-		CustomEvalPrompt:   prompts.CustomEval,
-		CustomAgents:       agents,
-		configDir:          globalDir,
-		localDir:           localDir,
+		Colors:                  colors,
+		TaskPrompt:              prompts.Task,
+		ReviewFirstPrompt:       prompts.ReviewFirst,
+		ReviewSecondPrompt:      prompts.ReviewSecond,
+		ReviewFirstCodexPrompt:  prompts.ReviewFirstCodex,
+		ReviewSecondCodexPrompt: prompts.ReviewSecondCodex,
+		CodexPrompt:             prompts.Codex,
+		MakePlanPrompt:          prompts.MakePlan,
+		FinalizePrompt:          prompts.Finalize,
+		CustomReviewPrompt:      prompts.CustomReview,
+		CustomEvalPrompt:        prompts.CustomEval,
+		CustomAgents:            agents,
+		configDir:               globalDir,
+		localDir:                localDir,
 	}
 
 	// notify_on_error and notify_on_complete default to true when not explicitly set
