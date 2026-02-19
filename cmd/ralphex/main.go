@@ -499,15 +499,6 @@ func runWatchOnly(ctx context.Context, o opts, cfg *config.Config, colors *progr
 	return nil
 }
 
-// checkCodexDep checks that the codex command is available in PATH.
-func checkCodexDep(cfg *config.Config) error {
-	codexCmd := cfg.CodexCommand
-	if codexCmd == "" {
-		codexCmd = "codex"
-	}
-	return checkDependencies(codexCmd)
-}
-
 // determineMode returns the execution mode based on CLI flags.
 func determineMode(o opts) processor.Mode {
 	switch {
