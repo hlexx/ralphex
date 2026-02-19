@@ -191,7 +191,8 @@ func run(ctx context.Context, o opts) error {
 		return runWatchOnly(ctx, o, cfg, colors)
 	}
 
-	if err := validatePrimaryExecutor(o, cfg); err != nil {
+	err = validatePrimaryExecutor(o, cfg)
+	if err != nil {
 		return err
 	}
 
@@ -211,10 +212,7 @@ func run(ctx context.Context, o opts) error {
 		return ensureErr
 	}
 
-	defaultBranch := resolveDefaultBranch(o.BaseRef, cfg.DefaultBranch, gitSvc.GetDefaultBranch())
-	if o.SkipFinalize {
-		cfg.FinalizeEnabled = false
-	}
+	defaultBranch := applyRuntimeFinalizeConfig(o, cfg, gitSvc)
 
 	mode := determineMode(o)
 
@@ -497,6 +495,15 @@ func runWatchOnly(ctx context.Context, o opts, cfg *config.Config, colors *progr
 		return fmt.Errorf("run watch-only mode: %w", watchErr)
 	}
 	return nil
+}
+
+// applyRuntimeFinalizeConfig resolves default branch and applies runtime finalize overrides.
+func applyRuntimeFinalizeConfig(o opts, cfg *config.Config, gitSvc *git.Service) string {
+	defaultBranch := resolveDefaultBranch(o.BaseRef, cfg.DefaultBranch, gitSvc.GetDefaultBranch())
+	if o.SkipFinalize {
+		cfg.FinalizeEnabled = false
+	}
+	return defaultBranch
 }
 
 // determineMode returns the execution mode based on CLI flags.
