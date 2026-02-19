@@ -315,7 +315,17 @@ func TestLogger_PhaseColors(t *testing.T) {
 	require.NoError(t, os.Chdir(tmpDir))
 	defer func() { _ = os.Chdir(origDir) }()
 
-	// enable colors for this test
+	// enable colors for this test (override NO_COLOR + global flag)
+	origNoColorEnv, hadNoColorEnv := os.LookupEnv("NO_COLOR")
+	require.NoError(t, os.Unsetenv("NO_COLOR"))
+	defer func() {
+		if hadNoColorEnv {
+			_ = os.Setenv("NO_COLOR", origNoColorEnv)
+		} else {
+			_ = os.Unsetenv("NO_COLOR")
+		}
+	}()
+
 	origNoColor := color.NoColor
 	color.NoColor = false
 	defer func() { color.NoColor = origNoColor }()

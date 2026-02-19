@@ -62,6 +62,7 @@ func TestPromptLoader_Load_PartialUserFiles(t *testing.T) {
 	assert.Equal(t, "user task prompt", prompts.Task)
 	// other prompts should fall back to embedded
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
 }
 
 func TestPromptLoader_Load_NoUserDir(t *testing.T) {
@@ -142,6 +143,8 @@ func TestPromptLoader_Load_LocalFallbackToEmbedded(t *testing.T) {
 	// embedded defaults used for missing prompts (both local and global)
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
 	assert.Contains(t, prompts.ReviewSecond, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewSecondCodex, "{{GOAL}}")
 	assert.Contains(t, prompts.Codex, "{{CODEX_OUTPUT}}")
 }
 

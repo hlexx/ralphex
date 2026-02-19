@@ -420,6 +420,9 @@ ralphex --review --base-ref abc1234 --skip-finalize
 # interactive plan creation
 ralphex --plan "add user authentication"
 
+# codex as primary executor (no claude; requires codex_sandbox=workspace-write or danger-full-access)
+ralphex --codex-primary docs/plans/feature.md
+
 # with custom max iterations
 ralphex --max-iterations=100 docs/plans/feature.md
 
@@ -429,6 +432,44 @@ ralphex --serve docs/plans/feature.md
 # web dashboard on custom port
 ralphex --serve --port 3000 docs/plans/feature.md
 ```
+
+### Codex Primary (no Claude)
+
+To run without Claude Code, use Codex as the primary executor. You must allow a writable sandbox (read-only won't work).
+
+1) Verify Codex CLI is installed and authenticated:
+
+```bash
+codex exec "echo ok"
+```
+
+2) Set a writable sandbox in `~/.config/ralphex/config`:
+
+```ini
+codex_sandbox = workspace-write
+# or: codex_sandbox = danger-full-access
+```
+
+Optional tuning:
+
+```ini
+codex_reasoning_effort = low
+codex_timeout_ms = 300000
+```
+
+3) Run ralphex:
+
+```bash
+# full execution
+ralphex --codex-primary docs/plans/feature.md
+
+# review-only
+ralphex --codex-primary --review
+```
+
+Optional: override codex review prompts via:
+- `~/.config/ralphex/prompts/review_first_codex.txt`
+- `~/.config/ralphex/prompts/review_second_codex.txt`
 
 ### Options
 
@@ -806,7 +847,7 @@ ralphex prompts to create an initial commit when the repository is empty. This i
 
 **Should I run ralphex on master or a feature branch?**
 
-For full mode, start on master - ralphex creates a branch automatically from the plan filename. For `--review` mode, switch to your feature branch first - reviews compare against master using `git diff master...HEAD`.
+For full mode, start on your default branch (main/master) - ralphex creates a branch automatically from the plan filename. For `--review` mode, switch to your feature branch first - reviews compare against the repository default branch (origin/HEAD when available).
 
 **How do I restore default agents after customizing?**
 
