@@ -2,25 +2,23 @@ package processor
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/umputun/ralphex/pkg/config"
 )
 
 // agentRefPattern matches {{agent:name}} template syntax
 var agentRefPattern = regexp.MustCompile(`\{\{agent:([a-zA-Z0-9_-]+)\}\}`)
 
-// agentExpansionTemplate is the wrapper for expanded agent references
-const agentExpansionTemplate = `Use the Task tool to launch a general-purpose agent with this prompt:
-"%s"
-
-Report findings only - no positive observations.`
-
 // getGoal returns the goal string based on whether a plan file is configured.
 func (r *Runner) getGoal() string {
 	if r.cfg.PlanFile == "" {
-		return "current branch vs master"
+		return "current branch vs " + r.getDefaultBranch()
 	}
-	return "implementation of plan at " + r.cfg.PlanFile
+	return "implementation of plan at " + r.resolvePlanFilePath()
 }
 
 // getPlanFileRef returns plan file reference or fallback text for prompts.
@@ -28,6 +26,33 @@ func (r *Runner) getPlanFileRef() string {
 	if r.cfg.PlanFile == "" {
 		return "(no plan file - reviewing current branch)"
 	}
+	return r.resolvePlanFilePath()
+}
+
+// resolvePlanFilePath returns the actual path to the plan file, checking if it was moved to completed/.
+// returns original path if file exists there, completed/ path if moved, or original path as fallback.
+func (r *Runner) resolvePlanFilePath() string {
+	if r.cfg.PlanFile == "" {
+		return ""
+	}
+
+	// check if file exists at original location
+	_, err := os.Stat(r.cfg.PlanFile)
+	if err == nil {
+		return r.cfg.PlanFile
+	}
+	if !os.IsNotExist(err) {
+		// permission or other error - return original path
+		return r.cfg.PlanFile
+	}
+
+	// check if file was moved to completed/ subdirectory
+	completedPath := filepath.Join(filepath.Dir(r.cfg.PlanFile), "completed", filepath.Base(r.cfg.PlanFile))
+	if _, err := os.Stat(completedPath); err == nil {
+		return completedPath
+	}
+
+	// fall back to original path
 	return r.cfg.PlanFile
 }
 
@@ -37,6 +62,57 @@ func (r *Runner) getProgressFileRef() string {
 		return "(no progress file available)"
 	}
 	return r.cfg.ProgressPath
+}
+
+// replaceBaseVariables replaces common template variables in prompts.
+// supported: {{PLAN_FILE}}, {{PROGRESS_FILE}}, {{GOAL}}, {{DEFAULT_BRANCH}}, {{PLANS_DIR}}
+// this is the core replacement function used by all prompt builders.
+func (r *Runner) replaceBaseVariables(prompt string) string {
+	result := prompt
+	result = strings.ReplaceAll(result, "{{PLAN_FILE}}", r.getPlanFileRef())
+	result = strings.ReplaceAll(result, "{{PROGRESS_FILE}}", r.getProgressFileRef())
+	result = strings.ReplaceAll(result, "{{GOAL}}", r.getGoal())
+	result = strings.ReplaceAll(result, "{{DEFAULT_BRANCH}}", r.getDefaultBranch())
+	result = strings.ReplaceAll(result, "{{PLANS_DIR}}", r.getPlansDir())
+	return result
+}
+
+// getDiffInstruction returns the appropriate git diff command based on iteration.
+// first iteration: compares default branch to HEAD (all changes in feature branch)
+// subsequent iterations: shows uncommitted changes only (fixes from previous iteration)
+func (r *Runner) getDiffInstruction(isFirstIteration bool) string {
+	if isFirstIteration {
+		return fmt.Sprintf("git diff %s...HEAD", r.getDefaultBranch())
+	}
+	return "git diff"
+}
+
+// replaceVariablesWithIteration replaces all template variables including iteration-aware ones.
+// supported: {{PLAN_FILE}}, {{PROGRESS_FILE}}, {{GOAL}}, {{DEFAULT_BRANCH}}, {{PLANS_DIR}}, {{DIFF_INSTRUCTION}}, {{agent:name}}
+// this variant is used when iteration context is needed (e.g., custom review prompts).
+func (r *Runner) replaceVariablesWithIteration(prompt string, isFirstIteration bool) string {
+	result := r.replaceBaseVariables(prompt)
+	result = strings.ReplaceAll(result, "{{DIFF_INSTRUCTION}}", r.getDiffInstruction(isFirstIteration))
+	result = r.expandAgentReferences(result)
+	return result
+}
+
+// formatAgentExpansion creates the Task tool instruction for an agent, respecting frontmatter overrides.
+func (r *Runner) formatAgentExpansion(prompt string, opts config.Options) string {
+	subagent := "general-purpose"
+	if opts.AgentType != "" {
+		subagent = opts.AgentType
+	}
+
+	var modelClause string
+	if opts.Model != "" {
+		modelClause = " with model=" + opts.Model
+	}
+
+	return fmt.Sprintf(`Use the Task tool%s to launch a %s agent with this prompt:
+"%s"
+
+Report findings only - no positive observations.`, modelClause, subagent, prompt)
 }
 
 // expandAgentReferences replaces {{agent:name}} patterns with Task tool instructions.
@@ -52,50 +128,57 @@ func (r *Runner) expandAgentReferences(prompt string) string {
 	}
 
 	// build agent lookup map
-	agentMap := make(map[string]string, len(agents))
+	agentMap := make(map[string]config.CustomAgent, len(agents))
 	for _, agent := range agents {
-		agentMap[agent.Name] = agent.Prompt
+		agentMap[agent.Name] = agent
 	}
 
 	return agentRefPattern.ReplaceAllStringFunc(prompt, func(match string) string {
 		// extract name directly from match: {{agent:NAME}} -> NAME
 		name := match[8 : len(match)-2] // skip "{{agent:" and "}}"
 
-		agentPrompt, ok := agentMap[name]
+		agent, ok := agentMap[name]
 		if !ok {
 			r.log.Print("[WARN] agent %q not found, leaving reference unexpanded", name)
 			return match
 		}
 
-		return fmt.Sprintf(agentExpansionTemplate, agentPrompt)
+		r.log.Print("agent %q: %s", name, agent.Options)
+
+		// expand variables in agent content (no agent expansion to avoid recursion)
+		agentPrompt := r.replaceBaseVariables(agent.Prompt)
+
+		return r.formatAgentExpansion(agentPrompt, agent.Options)
 	})
 }
 
-// replacePromptVariables replaces template variables in custom prompts.
-// supported variables: {{PLAN_FILE}}, {{PROGRESS_FILE}}, {{GOAL}}, {{agent:name}}
-// note: {{CODEX_OUTPUT}} is handled separately in buildCodexEvaluationPrompt
+// replacePromptVariables replaces all template variables including agent references.
+// supported: {{PLAN_FILE}}, {{PROGRESS_FILE}}, {{GOAL}}, {{DEFAULT_BRANCH}}, {{PLANS_DIR}}, {{agent:name}}
+// note: {{CODEX_OUTPUT}} and {{PLAN_DESCRIPTION}} are handled by specific build functions.
 func (r *Runner) replacePromptVariables(prompt string) string {
-	result := prompt
-	result = strings.ReplaceAll(result, "{{PLAN_FILE}}", r.getPlanFileRef())
-	result = strings.ReplaceAll(result, "{{PROGRESS_FILE}}", r.getProgressFileRef())
-	result = strings.ReplaceAll(result, "{{GOAL}}", r.getGoal())
-
-	// expand agent references
+	result := r.replaceBaseVariables(prompt)
 	result = r.expandAgentReferences(result)
-
 	return result
 }
 
-// buildTaskPrompt creates the prompt for executing a single task.
-// uses the task prompt loaded from config (either user-provided or embedded default).
-// agent references ({{agent:name}}) are expanded via replacePromptVariables.
-func (r *Runner) buildTaskPrompt() string {
-	return r.replacePromptVariables(r.cfg.AppConfig.TaskPrompt)
+// getDefaultBranch returns the default branch name or "master" as fallback.
+func (r *Runner) getDefaultBranch() string {
+	if r.cfg.DefaultBranch == "" {
+		return "master"
+	}
+	return r.cfg.DefaultBranch
 }
 
-// buildFirstReviewPrompt creates the prompt for first review pass - address all findings.
-// uses the loaded prompt template (user-provided or embedded default).
-// agent references ({{agent:name}}) are expanded via replacePromptVariables.
+// getPlansDir returns the plans directory or "docs/plans" as fallback.
+func (r *Runner) getPlansDir() string {
+	if r.cfg.AppConfig == nil || r.cfg.AppConfig.PlansDir == "" {
+		return "docs/plans"
+	}
+	return r.cfg.AppConfig.PlansDir
+}
+
+// buildFirstReviewPrompt creates the prompt for first review pass.
+// uses codex-specific prompt when codex is primary and a codex prompt is available.
 func (r *Runner) buildFirstReviewPrompt() string {
 	prompt := r.cfg.AppConfig.ReviewFirstPrompt
 	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewFirstCodexPrompt != "" {
@@ -104,9 +187,8 @@ func (r *Runner) buildFirstReviewPrompt() string {
 	return r.replacePromptVariables(prompt)
 }
 
-// buildSecondReviewPrompt creates the prompt for second review pass - critical/major only.
-// uses the second review prompt loaded from config (either user-provided or embedded default).
-// agent references ({{agent:name}}) are expanded via replacePromptVariables.
+// buildSecondReviewPrompt creates the prompt for second review pass.
+// uses codex-specific prompt when codex is primary and a codex prompt is available.
 func (r *Runner) buildSecondReviewPrompt() string {
 	prompt := r.cfg.AppConfig.ReviewSecondPrompt
 	if r.cfg.UseCodexForPrimary && r.cfg.AppConfig.ReviewSecondCodexPrompt != "" {
@@ -121,4 +203,43 @@ func (r *Runner) buildSecondReviewPrompt() string {
 func (r *Runner) buildCodexEvaluationPrompt(codexOutput string) string {
 	prompt := r.replacePromptVariables(r.cfg.AppConfig.CodexPrompt)
 	return strings.ReplaceAll(prompt, "{{CODEX_OUTPUT}}", codexOutput)
+}
+
+// buildPlanPrompt creates the prompt for interactive plan creation.
+// uses the make_plan prompt loaded from config (either user-provided or embedded default).
+// replaces {{PLAN_DESCRIPTION}} plus all base variables.
+func (r *Runner) buildPlanPrompt() string {
+	prompt := r.cfg.AppConfig.MakePlanPrompt
+	prompt = strings.ReplaceAll(prompt, "{{PLAN_DESCRIPTION}}", r.cfg.PlanDescription)
+	return r.replaceBaseVariables(prompt)
+}
+
+// buildCustomReviewPrompt creates the prompt for custom review tool execution.
+// uses the custom_review prompt loaded from config with {{DIFF_INSTRUCTION}} expanded.
+// claudeResponse from previous iteration is appended if present.
+func (r *Runner) buildCustomReviewPrompt(isFirst bool, claudeResponse string) string {
+	prompt := r.replaceVariablesWithIteration(r.cfg.AppConfig.CustomReviewPrompt, isFirst)
+
+	if claudeResponse != "" {
+		prompt = fmt.Sprintf(`%s
+
+---
+PREVIOUS REVIEW CONTEXT:
+Claude (previous reviewer) responded to your findings:
+
+%s
+
+Re-evaluate considering Claude's arguments. If Claude's fixes are correct, acknowledge them.
+If Claude's arguments are invalid, explain why the issues still exist.`, prompt, claudeResponse)
+	}
+
+	return prompt
+}
+
+// buildCustomEvaluationPrompt creates the prompt for claude to evaluate custom review tool output.
+// uses the custom_eval prompt loaded from config (either user-provided or embedded default).
+// agent references ({{agent:name}}) are expanded via replacePromptVariables.
+func (r *Runner) buildCustomEvaluationPrompt(customOutput string) string {
+	prompt := r.replacePromptVariables(r.cfg.AppConfig.CustomEvalPrompt)
+	return strings.ReplaceAll(prompt, "{{CUSTOM_OUTPUT}}", customOutput)
 }

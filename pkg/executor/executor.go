@@ -2,7 +2,6 @@
 package executor
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/umputun/ralphex/pkg/status"
 )
 
 //go:generate moq -out mocks/command_runner.go -pkg mocks -skip-ensure -fmt goimports . CommandRunner
@@ -19,6 +20,16 @@ type Result struct {
 	Output string // accumulated text output
 	Signal string // detected signal (COMPLETED, FAILED, etc.) or empty
 	Error  error  // execution error if any
+}
+
+// PatternMatchError is returned when a configured error pattern is detected in output.
+type PatternMatchError struct {
+	Pattern string // the pattern that matched
+	HelpCmd string // command to run for more information (e.g., "claude /usage")
+}
+
+func (e *PatternMatchError) Error() string {
+	return fmt.Sprintf("detected error pattern: %q", e.Pattern)
 }
 
 // CommandRunner abstracts command execution for testing.
@@ -31,10 +42,20 @@ type CommandRunner interface {
 type execClaudeRunner struct{}
 
 func (r *execClaudeRunner) Run(ctx context.Context, name string, args ...string) (io.Reader, func() error, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// check context before starting to avoid spawning a process that will be immediately killed
+	if err := ctx.Err(); err != nil {
+		return nil, nil, fmt.Errorf("context already canceled: %w", err)
+	}
+
+	// use exec.Command (not CommandContext) because we handle cancellation ourselves
+	// to ensure the entire process group is killed, not just the direct child
+	cmd := exec.Command(name, args...) //nolint:noctx // intentional: we handle context cancellation via process group kill
 
 	// filter out ANTHROPIC_API_KEY from environment (claude uses different auth)
 	cmd.Env = filterEnv(os.Environ(), "ANTHROPIC_API_KEY")
+
+	// create new process group so we can kill all descendants on cleanup
+	setupProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -45,7 +66,11 @@ func (r *execClaudeRunner) Run(ctx context.Context, name string, args ...string)
 	if err := cmd.Start(); err != nil {
 		return nil, nil, fmt.Errorf("start command: %w", err)
 	}
-	return stdout, cmd.Wait, nil
+
+	// setup process group cleanup with graceful shutdown on context cancellation
+	cleanup := newProcessGroupCleanup(cmd, ctx.Done())
+
+	return stdout, cleanup.Wait, nil
 }
 
 // splitArgs splits a space-separated argument string into a slice.
@@ -142,6 +167,7 @@ type ClaudeExecutor struct {
 	Args          string            // additional arguments (space-separated), defaults to standard args
 	OutputHandler func(text string) // called for each text chunk, can be nil
 	Debug         bool              // enable debug output
+	ErrorPatterns []string          // patterns to detect in output (e.g., rate limit messages)
 	cmdRunner     CommandRunner     // for testing, nil uses default
 }
 
@@ -175,7 +201,7 @@ func (e *ClaudeExecutor) Run(ctx context.Context, prompt string) Result {
 		return Result{Error: err}
 	}
 
-	result := e.parseStream(stdout)
+	result := e.parseStream(ctx, stdout)
 
 	if err := wait(); err != nil {
 		// check if it was context cancellation
@@ -188,27 +214,32 @@ func (e *ClaudeExecutor) Run(ctx context.Context, prompt string) Result {
 		}
 	}
 
+	// check for error patterns in output
+	if pattern := checkErrorPatterns(result.Output, e.ErrorPatterns); pattern != "" {
+		return Result{
+			Output: result.Output,
+			Signal: result.Signal,
+			Error:  &PatternMatchError{Pattern: pattern, HelpCmd: "claude /usage"},
+		}
+	}
+
 	return result
 }
 
 // parseStream reads and parses the JSON stream from claude CLI.
-func (e *ClaudeExecutor) parseStream(r io.Reader) Result {
+// uses readLines internally, so there is no line length limit.
+// checks ctx.Done() between reads so cancellation is not blocked by slow pipe reads.
+func (e *ClaudeExecutor) parseStream(ctx context.Context, r io.Reader) Result {
 	var output strings.Builder
 	var signal string
 
-	scanner := bufio.NewScanner(r)
-	// increase buffer size for large JSON lines (16MB max for large diffs with parallel agents)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 16*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Text()
+	err := readLines(ctx, r, func(line string) {
 		if line == "" {
-			continue
+			return
 		}
 
 		var event streamEvent
-		if err := json.Unmarshal([]byte(line), &event); err != nil {
+		if jsonErr := json.Unmarshal([]byte(line), &event); jsonErr != nil {
 			// print non-JSON lines as-is
 			if e.Debug {
 				fmt.Printf("[debug] non-JSON line: %s\n", line)
@@ -218,7 +249,7 @@ func (e *ClaudeExecutor) parseStream(r io.Reader) Result {
 			if e.OutputHandler != nil {
 				e.OutputHandler(line + "\n")
 			}
-			continue
+			return
 		}
 
 		text := e.extractText(&event)
@@ -233,9 +264,9 @@ func (e *ClaudeExecutor) parseStream(r io.Reader) Result {
 				signal = sig
 			}
 		}
-	}
+	})
 
-	if err := scanner.Err(); err != nil {
+	if err != nil {
 		return Result{Output: output.String(), Signal: signal, Error: fmt.Errorf("stream read: %w", err)}
 	}
 
@@ -286,18 +317,39 @@ func (e *ClaudeExecutor) extractText(event *streamEvent) string {
 	return ""
 }
 
-// detectSignal checks text for completion signals.
-// Looks for <<<RALPHEX:...>>> format signals.
+// detectSignal checks text for completion status.
+// looks for <<<RALPHEX:...>>> format status.
 func detectSignal(text string) string {
-	signals := []string{
-		"<<<RALPHEX:ALL_TASKS_DONE>>>",
-		"<<<RALPHEX:TASK_FAILED>>>",
-		"<<<RALPHEX:REVIEW_DONE>>>",
-		"<<<RALPHEX:CODEX_REVIEW_DONE>>>",
+	knownSignals := []string{
+		status.Completed,
+		status.Failed,
+		status.ReviewDone,
+		status.CodexDone,
+		status.PlanReady,
 	}
-	for _, sig := range signals {
+	for _, sig := range knownSignals {
 		if strings.Contains(text, sig) {
 			return sig
+		}
+	}
+	return ""
+}
+
+// checkErrorPatterns checks output for configured error patterns.
+// Returns the first matching pattern or empty string if none match.
+// Matching is case-insensitive substring search.
+func checkErrorPatterns(output string, patterns []string) string {
+	if len(patterns) == 0 {
+		return ""
+	}
+	outputLower := strings.ToLower(output)
+	for _, pattern := range patterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			continue
+		}
+		if strings.Contains(outputLower, strings.ToLower(trimmed)) {
+			return trimmed
 		}
 	}
 	return ""

@@ -51,6 +51,13 @@ linters:
     - wrapcheck
 
   settings:
+    gosec:
+      excludes:
+        - G115 # integer overflow uintptr->int, standard fd conversion pattern
+        - G204 # subprocess with variable, core functionality of the tool
+        - G703 # path traversal taint analysis, config paths from trusted sources
+        - G705 # XSS taint analysis, CLI stdout and JSON API responses
+        - G706 # log injection taint analysis, logs to stderr
     exhaustive:
       default-signifies-exhaustive: true
     nolintlint:
@@ -144,6 +151,12 @@ linters:
       - linters:
           - errcheck
         text: "Error return value of .*.Println.*is not checked"
+      - linters:
+          - errcheck
+        text: "Error return value of .*.Fprintln.*is not checked"
+      - linters:
+          - errcheck
+        source: "w\\.log\\("
       - linters:
           - gosec
         text: "G104: Errors unhandled"

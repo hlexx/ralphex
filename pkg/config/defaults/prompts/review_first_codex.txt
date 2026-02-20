@@ -1,10 +1,11 @@
 # codex-first review prompt
-# this prompt is used for the first (comprehensive) review pass when codex is the primary executor
+# this prompt is used for the first (comprehensive) review pass when codex is primary
 #
 # available variables:
 #   {{PLAN_FILE}} - path to the plan file being executed
 #   {{PROGRESS_FILE}} - path to the progress log (task execution + previous review iterations)
 #   {{GOAL}} - human-readable goal description
+#   {{DEFAULT_BRANCH}} - default branch name (main, master, trunk, etc.)
 
 Code review of: {{GOAL}}
 
@@ -12,8 +13,8 @@ Progress log: {{PROGRESS_FILE}} (contains task execution and previous review ite
 
 Step 1: Get branch context
 Run both commands to understand what changed:
-- `git log $(git symbolic-ref --quiet refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')..HEAD` (if empty, use main/master)
-- `git diff $(git symbolic-ref --quiet refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')...HEAD` (if empty, use main/master)
+- `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
+- `git diff {{DEFAULT_BRANCH}}...HEAD`
 
 Step 2: Review the changes
 Analyze for:
@@ -22,10 +23,10 @@ Analyze for:
 - Race conditions
 - Error handling gaps
 - Test coverage issues
-- Over-engineering / simplification opportunities
+- Over-engineering and simplification opportunities
 - Documentation gaps
 
-Step 3: Verify every finding (CRITICAL)
+Step 3: Verify every finding
 For each issue:
 1. Read the code at file:line and surrounding context
 2. Verify the issue is real, not a false positive

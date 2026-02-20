@@ -31,7 +31,9 @@ func Test_defaultsFS_PromptFiles(t *testing.T) {
 		{file: "defaults/prompts/task.txt", contains: []string{"{{PLAN_FILE}}", "{{PROGRESS_FILE}}", "RALPHEX:ALL_TASKS_DONE", "RALPHEX:TASK_FAILED"}},
 		{file: "defaults/prompts/review_first.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:testing}}"}},
 		{file: "defaults/prompts/review_second.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:implementation}}"}},
-		{file: "defaults/prompts/codex.txt", contains: []string{"{{CODEX_OUTPUT}}", "RALPHEX:CODEX_REVIEW_DONE", "GPT-5.2"}},
+		{file: "defaults/prompts/review_first_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE"}},
+		{file: "defaults/prompts/review_second_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE"}},
+		{file: "defaults/prompts/codex.txt", contains: []string{"{{CODEX_OUTPUT}}", "RALPHEX:CODEX_REVIEW_DONE", "Codex reviewed"}},
 	}
 
 	for _, tc := range testCases {
@@ -54,6 +56,8 @@ func Test_defaultsFS_AllFilesPresent(t *testing.T) {
 		"defaults/prompts/task.txt",
 		"defaults/prompts/review_first.txt",
 		"defaults/prompts/review_second.txt",
+		"defaults/prompts/review_first_codex.txt",
+		"defaults/prompts/review_second_codex.txt",
 		"defaults/prompts/codex.txt",
 	}
 
@@ -148,8 +152,8 @@ iteration_delay_ms = 9999
 	assert.NotEmpty(t, cfg.TaskPrompt)
 }
 
-func Test_defaultConfigDir(t *testing.T) {
-	dir := defaultConfigDir()
+func TestDefaultConfigDir(t *testing.T) {
+	dir := DefaultConfigDir()
 	assert.NotEmpty(t, dir)
 	assert.Contains(t, dir, "ralphex")
 }
@@ -196,7 +200,7 @@ func TestLoad_PartialConfig(t *testing.T) {
 	assert.Equal(t, "claude", cfg.ClaudeCommand)
 	assert.Equal(t, "--dangerously-skip-permissions --output-format stream-json --verbose", cfg.ClaudeArgs)
 	assert.Equal(t, "codex", cfg.CodexCommand)
-	assert.Equal(t, "gpt-5.2-codex", cfg.CodexModel)
+	assert.Equal(t, "gpt-5.3-codex", cfg.CodexModel)
 	assert.Equal(t, "xhigh", cfg.CodexReasoningEffort)
 	assert.Equal(t, "read-only", cfg.CodexSandbox)
 	assert.Equal(t, 2000, cfg.IterationDelayMs)
@@ -222,7 +226,7 @@ func TestLoad_EmptyConfig(t *testing.T) {
 	assert.Equal(t, "claude", cfg.ClaudeCommand)
 	assert.Equal(t, "--dangerously-skip-permissions --output-format stream-json --verbose", cfg.ClaudeArgs)
 	assert.Equal(t, "codex", cfg.CodexCommand)
-	assert.Equal(t, "gpt-5.2-codex", cfg.CodexModel)
+	assert.Equal(t, "gpt-5.3-codex", cfg.CodexModel)
 	assert.Equal(t, "xhigh", cfg.CodexReasoningEffort)
 	assert.Equal(t, "read-only", cfg.CodexSandbox)
 	assert.Equal(t, "docs/plans", cfg.PlansDir)
@@ -268,6 +272,43 @@ func TestLoad_ExplicitFalseCodexEnabled(t *testing.T) {
 	// explicit false should be preserved (not overwritten by default true)
 	assert.False(t, cfg.CodexEnabled)
 	assert.True(t, cfg.CodexEnabledSet)
+}
+
+func TestLoad_ExplicitTrueFinalizeEnabled(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	// explicitly set finalize_enabled to true
+	configContent := `finalize_enabled = true`
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(configContent), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	// explicit true should be preserved
+	assert.True(t, cfg.FinalizeEnabled)
+	assert.True(t, cfg.FinalizeEnabledSet)
+}
+
+func TestLoad_FinalizeEnabledDefaultFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	// empty config - finalize_enabled should be false by default
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(""), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	// finalize_enabled should default to false (disabled)
+	assert.False(t, cfg.FinalizeEnabled)
+	assert.False(t, cfg.FinalizeEnabledSet)
 }
 
 func TestLoad_AllUserValues(t *testing.T) {
@@ -616,7 +657,7 @@ color_task = #0000ff
 	// embedded defaults (not in global or local)
 	assert.Equal(t, "--dangerously-skip-permissions --output-format stream-json --verbose", cfg.ClaudeArgs)
 	assert.Equal(t, "codex", cfg.CodexCommand)
-	assert.Equal(t, "gpt-5.2-codex", cfg.CodexModel)
+	assert.Equal(t, "gpt-5.3-codex", cfg.CodexModel)
 
 	// --- verify colors merge chain ---
 	// local override
@@ -684,6 +725,153 @@ color_task = #123456
 
 	// verify configDir is the symlink path (not resolved real path)
 	assert.Equal(t, symlinkDir, cfg.configDir)
+}
+
+func TestLoad_ExternalReviewToolConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	// set external review tool config values
+	configContent := `
+external_review_tool = custom
+custom_review_script = /path/to/my-review.sh
+`
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(configContent), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom", cfg.ExternalReviewTool)
+	assert.Equal(t, "/path/to/my-review.sh", cfg.CustomReviewScript)
+}
+
+func TestLoad_ExternalReviewToolDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	// empty config - should use defaults
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(""), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	// external_review_tool should default to "codex"
+	assert.Equal(t, "codex", cfg.ExternalReviewTool)
+	assert.Empty(t, cfg.CustomReviewScript)
+}
+
+func TestLocalConfig_LocalOverridesExternalReviewTool(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global")
+	localDir := filepath.Join(tmpDir, ".ralphex")
+
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "agents"), 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	// global config with external_review_tool = codex
+	globalConfig := `external_review_tool = codex`
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "config"), []byte(globalConfig), 0o600))
+
+	// local config disables external review
+	localConfig := `external_review_tool = none`
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "config"), []byte(localConfig), 0o600))
+
+	cfg, err := loadWithLocal(globalDir, localDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "none", cfg.ExternalReviewTool)
+}
+
+func TestLoad_NotifyParamsPopulated(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	configContent := `
+notify_channels = telegram, webhook
+notify_on_error = true
+notify_on_complete = false
+notify_timeout_ms = 15000
+notify_telegram_token = bot123:ABC
+notify_telegram_chat = -100123
+notify_webhook_urls = https://hook.example.com
+`
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(configContent), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"telegram", "webhook"}, cfg.NotifyParams.Channels)
+	assert.True(t, cfg.NotifyParams.OnError)
+	assert.False(t, cfg.NotifyParams.OnComplete)
+	assert.Equal(t, 15000, cfg.NotifyParams.TimeoutMs)
+	assert.Equal(t, "bot123:ABC", cfg.NotifyParams.TelegramToken)
+	assert.Equal(t, "-100123", cfg.NotifyParams.TelegramChat)
+	assert.Equal(t, []string{"https://hook.example.com"}, cfg.NotifyParams.WebhookURLs)
+}
+
+func TestLoad_NotifyParamsDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configDir := filepath.Join(tmpDir, "ralphex")
+	require.NoError(t, os.MkdirAll(configDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(configDir, "agents"), 0o700))
+
+	// empty config - uses embedded defaults for notify flags
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config"), []byte(""), 0o600))
+
+	cfg, err := Load(configDir)
+	require.NoError(t, err)
+
+	assert.Empty(t, cfg.NotifyParams.Channels)
+	assert.True(t, cfg.NotifyParams.OnError)
+	assert.True(t, cfg.NotifyParams.OnComplete)
+	assert.Equal(t, 0, cfg.NotifyParams.TimeoutMs)
+	assert.Empty(t, cfg.NotifyParams.TelegramToken)
+}
+
+func TestLocalConfig_LocalOverridesNotifyParams(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global")
+	localDir := filepath.Join(tmpDir, ".ralphex")
+
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "prompts"), 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Join(globalDir, "agents"), 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	globalConfig := `
+notify_channels = telegram
+notify_telegram_token = global-token
+notify_timeout_ms = 10000
+`
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "config"), []byte(globalConfig), 0o600))
+
+	localConfig := `
+notify_channels = slack
+notify_timeout_ms = 5000
+`
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "config"), []byte(localConfig), 0o600))
+
+	cfg, err := loadWithLocal(globalDir, localDir)
+	require.NoError(t, err)
+
+	// local overrides channels and timeout
+	assert.Equal(t, []string{"slack"}, cfg.NotifyParams.Channels)
+	assert.Equal(t, 5000, cfg.NotifyParams.TimeoutMs)
+
+	// global telegram token preserved (not in local)
+	assert.Equal(t, "global-token", cfg.NotifyParams.TelegramToken)
 }
 
 func TestLoad_SymlinkedLocalDir(t *testing.T) {

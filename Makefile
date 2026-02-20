@@ -33,6 +33,15 @@ version:
 	@echo "branch: $(BRANCH), hash: $(HASH), timestamp: $(TIMESTAMP)"
 	@echo "revision: $(REV)"
 
+e2e-setup:
+	go run github.com/playwright-community/playwright-go/cmd/playwright@latest install --with-deps chromium
+
+e2e:
+	go test -v -failfast -count=1 -timeout=5m -tags=e2e ./e2e/...
+
+e2e-ui:
+	E2E_HEADLESS=false go test -v -failfast -count=1 -timeout=10m -tags=e2e ./e2e/...
+
 e2e-prep: build
 	@./scripts/prep-toy-test.sh
 	@cp .bin/ralphex /tmp/ralphex-test/.bin/ralphex
@@ -64,10 +73,33 @@ e2e-codex: build
 	@echo "Monitor: tail -f /tmp/ralphex-review-test/progress-codex.txt"
 
 prep_site:
-	cp -fv README.md site/docs/index.md
-	cp -rv assets site/docs/
-	cp -fv llms.txt site/docs/
-	grep -v -E 'badge|coveralls|goreportcard' site/docs/index.md > site/docs/index.md.tmp && mv site/docs/index.md.tmp site/docs/index.md
+	# prepare docs source directory for mkdocs
+	rm -rf site/docs-src && mkdir -p site/docs-src
+	cp -fv README.md site/docs-src/index.md
+	cp -rv assets site/docs-src/
+	grep -v -E 'badge|coveralls|goreportcard' site/docs-src/index.md > site/docs-src/index.md.tmp && mv site/docs-src/index.md.tmp site/docs-src/index.md
+	sed 's|](llms.txt)|](/llms.txt)|g' site/docs-src/index.md > site/docs-src/index.md.tmp && mv site/docs-src/index.md.tmp site/docs-src/index.md
+	mkdir -p site/docs-src/stylesheets && cp -fv site/docs/stylesheets/extra.css site/docs-src/stylesheets/
+	# build site structure: landing page + docs subdirectory
+	rm -rf site/site && mkdir -p site/site
+	cp -fv site/docs/index.html site/site/
+	cp -fv site/docs/favicon.png site/site/
+	cp -fv site/docs/robots.txt site/site/
+	cp -fv site/docs/sitemap.xml site/site/
+	cp -rv assets site/site/
+	cp -fv llms.txt site/site/
+	# build mkdocs into site/site/docs/
 	cd site && pip install -r requirements.txt && mkdocs build
+	# copy raw claude assets (not rendered by mkdocs)
+	rm -rf site/site/docs/assets/claude && cp -rv assets/claude site/site/docs/assets/
 
-.PHONY: all build test lint fmt race version e2e-prep e2e-review e2e-codex prep_site
+docker-build:
+	docker build -t ghcr.io/umputun/ralphex:latest .
+
+docker-build-go: docker-build
+	docker build -t ghcr.io/umputun/ralphex-go:latest -f Dockerfile-go .
+
+docker-run:
+	./scripts/ralphex-dk.sh $(ARGS)
+
+.PHONY: all build test lint fmt race version e2e-setup e2e e2e-ui e2e-prep e2e-review e2e-codex prep_site docker-build docker-build-go docker-run

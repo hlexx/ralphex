@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/umputun/ralphex/pkg/notify"
 )
 
 //go:embed defaults/config defaults/prompts/* defaults/agents/*
@@ -19,12 +21,23 @@ const (
 	reviewFirstCodexPromptFile  = "review_first_codex.txt"
 	reviewSecondCodexPromptFile = "review_second_codex.txt"
 	codexPromptFile             = "codex.txt"
+	makePlanPromptFile          = "make_plan.txt"
+	finalizePromptFile          = "finalize.txt"
+	customReviewPromptFile      = "custom_review.txt"
+	customEvalPromptFile        = "custom_eval.txt"
 )
 
 // Config holds all configuration settings for ralphex.
-// Fields ending in *Set (e.g., CodexEnabledSet) track whether that field was explicitly
-// set in config. This allows distinguishing explicit false/0 from "not set", enabling
-// proper merge behavior where local config can override global config with zero values.
+// Fields ending in *Set track whether that field was explicitly set in config.
+// This allows distinguishing explicit false/0 from "not set", enabling proper
+// merge behavior where local config can override global config with zero values.
+//
+// *Set fields:
+//   - CodexEnabledSet: tracks if codex_enabled was explicitly set
+//   - CodexTimeoutMsSet: tracks if codex_timeout_ms was explicitly set
+//   - IterationDelayMsSet: tracks if iteration_delay_ms was explicitly set
+//   - TaskRetryCountSet: tracks if task_retry_count was explicitly set
+//   - FinalizeEnabledSet: tracks if finalize_enabled was explicitly set
 type Config struct {
 	ClaudeCommand string `json:"claude_command"`
 	ClaudeArgs    string `json:"claude_args"`
@@ -38,12 +51,27 @@ type Config struct {
 	CodexTimeoutMsSet    bool   `json:"-"` // tracks if codex_timeout_ms was explicitly set in config
 	CodexSandbox         string `json:"codex_sandbox"`
 
+	ExternalReviewTool string `json:"external_review_tool"` // "codex", "custom", or "none"
+	CustomReviewScript string `json:"custom_review_script"` // path to custom review script
+
 	IterationDelayMs    int  `json:"iteration_delay_ms"`
 	IterationDelayMsSet bool `json:"-"` // tracks if iteration_delay_ms was explicitly set in config
 	TaskRetryCount      int  `json:"task_retry_count"`
 	TaskRetryCountSet   bool `json:"-"` // tracks if task_retry_count was explicitly set in config
 
-	PlansDir string `json:"plans_dir"`
+	FinalizeEnabled    bool `json:"finalize_enabled"`
+	FinalizeEnabledSet bool `json:"-"` // tracks if finalize_enabled was explicitly set in config
+
+	PlansDir      string   `json:"plans_dir"`
+	WatchDirs     []string `json:"watch_dirs"`     // directories to watch for progress files
+	DefaultBranch string   `json:"default_branch"` // override auto-detected default branch
+
+	// error patterns to detect in executor output (e.g., rate limit messages)
+	ClaudeErrorPatterns []string `json:"claude_error_patterns"`
+	CodexErrorPatterns  []string `json:"codex_error_patterns"`
+
+	// notification parameters
+	NotifyParams notify.Params `json:"-"`
 
 	// output colors (RGB values as comma-separated strings)
 	Colors ColorConfig `json:"-"`
@@ -55,6 +83,10 @@ type Config struct {
 	ReviewFirstCodexPrompt  string `json:"-"`
 	ReviewSecondCodexPrompt string `json:"-"`
 	CodexPrompt             string `json:"-"`
+	MakePlanPrompt          string `json:"-"`
+	FinalizePrompt          string `json:"-"`
+	CustomReviewPrompt      string `json:"-"`
+	CustomEvalPrompt        string `json:"-"`
 
 	// custom agents (loaded separately from files)
 	CustomAgents []CustomAgent `json:"-"`
@@ -65,8 +97,9 @@ type Config struct {
 
 // CustomAgent represents a user-defined review agent.
 type CustomAgent struct {
-	Name   string // filename without extension
-	Prompt string // contents of the agent file
+	Name    string // filename without extension
+	Prompt  string // contents of the agent file (body after options header)
+	Options        // embedded: model and agent type parsed from frontmatter
 }
 
 // ColorConfig holds RGB values for output colors.
@@ -90,7 +123,7 @@ type ColorConfig struct {
 func Load(configDir string) (*Config, error) {
 	globalDir := configDir
 	if globalDir == "" {
-		globalDir = defaultConfigDir()
+		globalDir = DefaultConfigDir()
 	}
 
 	// auto-detect local config directory in cwd.
@@ -111,13 +144,40 @@ func Load(configDir string) (*Config, error) {
 // local config (.ralphex/) overrides global config (~/.config/ralphex/) per-field.
 // if localDir is empty, only global config is used.
 func loadWithLocal(globalDir, localDir string) (*Config, error) {
-	embedFS := defaultsFS
-
 	// install defaults
-	installer := newDefaultsInstaller(embedFS)
+	installer := newDefaultsInstaller(defaultsFS)
 	if err := installer.Install(globalDir); err != nil {
 		return nil, fmt.Errorf("install defaults: %w", err)
 	}
+
+	return loadConfigFromDirs(globalDir, localDir)
+}
+
+// LoadReadOnly loads configuration without installing defaults.
+// use this in tests or tools that should not modify user's config directory.
+// if config files don't exist, embedded defaults are used.
+func LoadReadOnly(configDir string) (*Config, error) {
+	globalDir := configDir
+	if globalDir == "" {
+		globalDir = DefaultConfigDir()
+	}
+
+	// auto-detect local config directory in cwd
+	var localDir string
+	if cwd, err := os.Getwd(); err == nil {
+		candidate := filepath.Join(cwd, ".ralphex")
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			localDir = candidate
+		}
+	}
+
+	return loadConfigFromDirs(globalDir, localDir)
+}
+
+// loadConfigFromDirs loads configuration from specified directories without installing defaults.
+// shared by loadWithLocal (after installing) and LoadReadOnly (without installing).
+func loadConfigFromDirs(globalDir, localDir string) (*Config, error) {
+	embedFS := defaultsFS
 
 	// build config file paths
 	var localConfigPath, globalConfigPath string
@@ -126,7 +186,7 @@ func loadWithLocal(globalDir, localDir string) (*Config, error) {
 	}
 	globalConfigPath = filepath.Join(globalDir, "config")
 
-	// load values (scalars)
+	// load values (scalars) - falls back to embedded if files don't exist
 	vl := newValuesLoader(embedFS)
 	values, err := vl.Load(localConfigPath, globalConfigPath)
 	if err != nil {
@@ -158,7 +218,7 @@ func loadWithLocal(globalDir, localDir string) (*Config, error) {
 		localAgentsPath = filepath.Join(localDir, "agents")
 	}
 	globalAgentsPath = filepath.Join(globalDir, "agents")
-	al := newAgentLoader()
+	al := newAgentLoader(defaultsFS)
 	agents, err := al.Load(localAgentsPath, globalAgentsPath)
 	if err != nil {
 		return nil, fmt.Errorf("load agents: %w", err)
@@ -166,21 +226,48 @@ func loadWithLocal(globalDir, localDir string) (*Config, error) {
 
 	// assemble config
 	c := &Config{
-		ClaudeCommand:           values.ClaudeCommand,
-		ClaudeArgs:              values.ClaudeArgs,
-		CodexEnabled:            values.CodexEnabled,
-		CodexEnabledSet:         values.CodexEnabledSet,
-		CodexCommand:            values.CodexCommand,
-		CodexModel:              values.CodexModel,
-		CodexReasoningEffort:    values.CodexReasoningEffort,
-		CodexTimeoutMs:          values.CodexTimeoutMs,
-		CodexTimeoutMsSet:       values.CodexTimeoutMsSet,
-		CodexSandbox:            values.CodexSandbox,
-		IterationDelayMs:        values.IterationDelayMs,
-		IterationDelayMsSet:     values.IterationDelayMsSet,
-		TaskRetryCount:          values.TaskRetryCount,
-		TaskRetryCountSet:       values.TaskRetryCountSet,
-		PlansDir:                values.PlansDir,
+		ClaudeCommand:        values.ClaudeCommand,
+		ClaudeArgs:           values.ClaudeArgs,
+		CodexEnabled:         values.CodexEnabled,
+		CodexEnabledSet:      values.CodexEnabledSet,
+		CodexCommand:         values.CodexCommand,
+		CodexModel:           values.CodexModel,
+		CodexReasoningEffort: values.CodexReasoningEffort,
+		CodexTimeoutMs:       values.CodexTimeoutMs,
+		CodexTimeoutMsSet:    values.CodexTimeoutMsSet,
+		CodexSandbox:         values.CodexSandbox,
+		ExternalReviewTool:   values.ExternalReviewTool,
+		CustomReviewScript:   values.CustomReviewScript,
+		IterationDelayMs:     values.IterationDelayMs,
+		IterationDelayMsSet:  values.IterationDelayMsSet,
+		TaskRetryCount:       values.TaskRetryCount,
+		TaskRetryCountSet:    values.TaskRetryCountSet,
+		FinalizeEnabled:      values.FinalizeEnabled,
+		FinalizeEnabledSet:   values.FinalizeEnabledSet,
+		PlansDir:             values.PlansDir,
+		DefaultBranch:        values.DefaultBranch,
+		WatchDirs:            values.WatchDirs,
+		ClaudeErrorPatterns:  values.ClaudeErrorPatterns,
+		CodexErrorPatterns:   values.CodexErrorPatterns,
+		NotifyParams: notify.Params{
+			Channels:      values.NotifyChannels,
+			OnError:       values.NotifyOnError,
+			OnComplete:    values.NotifyOnComplete,
+			TimeoutMs:     values.NotifyTimeoutMs,
+			TelegramToken: values.NotifyTelegramToken,
+			TelegramChat:  values.NotifyTelegramChat,
+			SlackToken:    values.NotifySlackToken,
+			SlackChannel:  values.NotifySlackChannel,
+			SMTPHost:      values.NotifySMTPHost,
+			SMTPPort:      values.NotifySMTPPort,
+			SMTPUsername:  values.NotifySMTPUsername,
+			SMTPPassword:  values.NotifySMTPPassword,
+			SMTPStartTLS:  values.NotifySMTPStartTLS,
+			EmailFrom:     values.NotifyEmailFrom,
+			EmailTo:       values.NotifyEmailTo,
+			WebhookURLs:   values.NotifyWebhookURLs,
+			CustomScript:  values.NotifyCustomScript,
+		},
 		Colors:                  colors,
 		TaskPrompt:              prompts.Task,
 		ReviewFirstPrompt:       prompts.ReviewFirst,
@@ -188,19 +275,31 @@ func loadWithLocal(globalDir, localDir string) (*Config, error) {
 		ReviewFirstCodexPrompt:  prompts.ReviewFirstCodex,
 		ReviewSecondCodexPrompt: prompts.ReviewSecondCodex,
 		CodexPrompt:             prompts.Codex,
+		MakePlanPrompt:          prompts.MakePlan,
+		FinalizePrompt:          prompts.Finalize,
+		CustomReviewPrompt:      prompts.CustomReview,
+		CustomEvalPrompt:        prompts.CustomEval,
 		CustomAgents:            agents,
 		configDir:               globalDir,
 		localDir:                localDir,
 	}
 
+	// notify_on_error and notify_on_complete default to true when not explicitly set
+	if !values.NotifyOnErrorSet {
+		c.NotifyParams.OnError = true
+	}
+	if !values.NotifyOnCompleteSet {
+		c.NotifyParams.OnComplete = true
+	}
+
 	return c, nil
 }
 
-// defaultConfigDir returns the default configuration directory path.
+// DefaultConfigDir returns the default configuration directory path.
 // returns ~/.config/ralphex/ on all platforms.
 // if os.UserHomeDir() fails, falls back to ./.config/ralphex/ silently -
 // this allows the tool to work even in unusual environments.
-func defaultConfigDir() string {
+func DefaultConfigDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return filepath.Join(".", ".config", "ralphex")

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/umputun/ralphex/pkg/executor/mocks"
+	"github.com/umputun/ralphex/pkg/status"
 )
 
 func TestClaudeExecutor_Run_Success(t *testing.T) {
@@ -158,6 +159,12 @@ func TestClaudeExecutor_parseStream(t *testing.T) {
 			wantSignal: "<<<RALPHEX:CODEX_REVIEW_DONE>>>",
 		},
 		{
+			name:       "plan ready signal",
+			input:      `{"type":"content_block_delta","delta":{"type":"text_delta","text":"Plan complete. <<<RALPHEX:PLAN_READY>>>"}}`,
+			wantOutput: "Plan complete. <<<RALPHEX:PLAN_READY>>>",
+			wantSignal: "<<<RALPHEX:PLAN_READY>>>",
+		},
+		{
 			name:       "result type",
 			input:      `{"type":"result","result":{"output":"Final output"}}`,
 			wantOutput: "Final output",
@@ -192,7 +199,7 @@ func TestClaudeExecutor_parseStream(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			e := &ClaudeExecutor{}
-			result := e.parseStream(strings.NewReader(tc.input))
+			result := e.parseStream(context.Background(), strings.NewReader(tc.input))
 
 			assert.Equal(t, tc.wantOutput, result.Output)
 			assert.Equal(t, tc.wantSignal, result.Signal)
@@ -211,7 +218,7 @@ func TestClaudeExecutor_parseStream_withHandler(t *testing.T) {
 		},
 	}
 
-	result := e.parseStream(strings.NewReader(input))
+	result := e.parseStream(context.Background(), strings.NewReader(input))
 
 	assert.Equal(t, "chunk1chunk2", result.Output)
 	assert.Equal(t, []string{"chunk1", "chunk2"}, chunks)
@@ -222,7 +229,7 @@ func TestClaudeExecutor_parseStream_withDebug(t *testing.T) {
 	input := "not json\n" + `{"type":"content_block_delta","delta":{"type":"text_delta","text":"valid"}}`
 
 	e := &ClaudeExecutor{Debug: true}
-	result := e.parseStream(strings.NewReader(input))
+	result := e.parseStream(context.Background(), strings.NewReader(input))
 
 	assert.Equal(t, "not json\nvalid", result.Output)
 }
@@ -319,10 +326,11 @@ func TestDetectSignal(t *testing.T) {
 		want string
 	}{
 		{"some text", ""},
-		{"task done <<<RALPHEX:ALL_TASKS_DONE>>>", "<<<RALPHEX:ALL_TASKS_DONE>>>"},
-		{"<<<RALPHEX:TASK_FAILED>>> error", "<<<RALPHEX:TASK_FAILED>>>"},
-		{"review complete <<<RALPHEX:REVIEW_DONE>>>", "<<<RALPHEX:REVIEW_DONE>>>"},
-		{"<<<RALPHEX:CODEX_REVIEW_DONE>>> analysis done", "<<<RALPHEX:CODEX_REVIEW_DONE>>>"},
+		{"task done " + status.Completed, status.Completed},
+		{status.Failed + " error", status.Failed},
+		{"review complete " + status.ReviewDone, status.ReviewDone},
+		{status.CodexDone + " analysis done", status.CodexDone},
+		{"plan complete " + status.PlanReady, status.PlanReady},
 		{"no signal here", ""},
 	}
 
@@ -473,8 +481,7 @@ func TestFilterEnv(t *testing.T) {
 }
 
 func TestClaudeExecutor_parseStream_largeLines(t *testing.T) {
-	// test that lines larger than 64KB (default bufio.Scanner limit) are handled
-	// this was the "token too long" bug fix
+	// test that lines of arbitrary length are handled without limit
 
 	tests := []struct {
 		name string
@@ -484,16 +491,20 @@ func TestClaudeExecutor_parseStream_largeLines(t *testing.T) {
 		{"500KB line", 500 * 1024},
 		{"1MB line", 1024 * 1024},
 		{"2MB line", 2 * 1024 * 1024},
+		{"65MB line", 65 * 1024 * 1024},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.size >= 65*1024*1024 && testing.Short() {
+				t.Skip("skipping 65MB allocation in short mode")
+			}
 			// create a large text payload
 			largeText := strings.Repeat("x", tc.size)
 			jsonLine := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"` + largeText + `"}}`
 
 			e := &ClaudeExecutor{}
-			result := e.parseStream(strings.NewReader(jsonLine))
+			result := e.parseStream(context.Background(), strings.NewReader(jsonLine))
 
 			require.NoError(t, result.Error, "should handle %d byte line without error", tc.size)
 			assert.Len(t, result.Output, tc.size, "output should contain full text")
@@ -514,8 +525,152 @@ func TestClaudeExecutor_parseStream_multipleLargeLines(t *testing.T) {
 	input := strings.Join(lines, "\n")
 
 	e := &ClaudeExecutor{}
-	result := e.parseStream(strings.NewReader(input))
+	result := e.parseStream(context.Background(), strings.NewReader(input))
 
 	require.NoError(t, result.Error)
 	assert.Len(t, result.Output, lineSize*numLines, "should contain all output from all lines")
+}
+
+func TestPatternMatchError_Error(t *testing.T) {
+	err := &PatternMatchError{Pattern: "rate limit exceeded", HelpCmd: "claude /usage"}
+	assert.Equal(t, `detected error pattern: "rate limit exceeded"`, err.Error())
+}
+
+func TestCheckErrorPatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		output   string
+		patterns []string
+		want     string
+	}{
+		{name: "no patterns", output: "some output", patterns: nil, want: ""},
+		{name: "empty patterns slice", output: "some output", patterns: []string{}, want: ""},
+		{name: "no match", output: "everything is fine", patterns: []string{"error", "failed"}, want: ""},
+		{name: "exact match", output: "You've hit your limit", patterns: []string{"You've hit your limit"}, want: "You've hit your limit"},
+		{name: "substring match", output: "Error: You've hit your limit today", patterns: []string{"hit your limit"}, want: "hit your limit"},
+		{name: "case insensitive", output: "YOU'VE HIT YOUR LIMIT", patterns: []string{"you've hit your limit"}, want: "you've hit your limit"},
+		{name: "mixed case match", output: "Rate Limit Exceeded", patterns: []string{"rate limit exceeded"}, want: "rate limit exceeded"},
+		{name: "first pattern wins", output: "rate limit and quota exceeded", patterns: []string{"rate limit", "quota exceeded"}, want: "rate limit"},
+		{name: "second pattern matches", output: "your quota exceeded the limit", patterns: []string{"rate limit", "quota exceeded"}, want: "quota exceeded"},
+		{name: "empty pattern skipped", output: "some text", patterns: []string{"", "some"}, want: "some"},
+		{name: "whitespace in pattern", output: "rate  limit", patterns: []string{"rate  limit"}, want: "rate  limit"},
+		{name: "multiline output", output: "line1\nYou've hit your limit\nline3", patterns: []string{"hit your limit"}, want: "hit your limit"},
+		{name: "api error 500", output: `API Error: 500 {"type":"error","error":{"type":"api_error","message":"Internal server error"}}`, patterns: []string{"API Error:"}, want: "API Error:"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkErrorPatterns(tc.output, tc.patterns)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestClaudeExecutor_Run_ErrorPattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		patterns    []string
+		wantError   bool
+		wantPattern string
+		wantHelpCmd string
+		wantOutput  string
+	}{
+		{
+			name:       "no patterns configured",
+			output:     `{"type":"content_block_delta","delta":{"type":"text_delta","text":"You've hit your limit"}}`,
+			patterns:   nil,
+			wantError:  false,
+			wantOutput: "You've hit your limit",
+		},
+		{
+			name:       "pattern not matched",
+			output:     `{"type":"content_block_delta","delta":{"type":"text_delta","text":"Task completed successfully"}}`,
+			patterns:   []string{"rate limit", "quota exceeded"},
+			wantError:  false,
+			wantOutput: "Task completed successfully",
+		},
+		{
+			name:        "pattern matched",
+			output:      `{"type":"content_block_delta","delta":{"type":"text_delta","text":"Error: You've hit your limit for today"}}`,
+			patterns:    []string{"hit your limit"},
+			wantError:   true,
+			wantPattern: "hit your limit",
+			wantHelpCmd: "claude /usage",
+			wantOutput:  "Error: You've hit your limit for today",
+		},
+		{
+			name:        "case insensitive match",
+			output:      `{"type":"content_block_delta","delta":{"type":"text_delta","text":"RATE LIMIT EXCEEDED"}}`,
+			patterns:    []string{"rate limit exceeded"},
+			wantError:   true,
+			wantPattern: "rate limit exceeded",
+			wantHelpCmd: "claude /usage",
+			wantOutput:  "RATE LIMIT EXCEEDED",
+		},
+		{
+			name:        "first matching pattern returned",
+			output:      `{"type":"content_block_delta","delta":{"type":"text_delta","text":"rate limit and quota exceeded"}}`,
+			patterns:    []string{"rate limit", "quota exceeded"},
+			wantError:   true,
+			wantPattern: "rate limit",
+			wantHelpCmd: "claude /usage",
+			wantOutput:  "rate limit and quota exceeded",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mocks.CommandRunnerMock{
+				RunFunc: func(_ context.Context, _ string, _ ...string) (io.Reader, func() error, error) {
+					return strings.NewReader(tc.output), func() error { return nil }, nil
+				},
+			}
+			e := &ClaudeExecutor{
+				cmdRunner:     mock,
+				ErrorPatterns: tc.patterns,
+			}
+
+			result := e.Run(context.Background(), "test prompt")
+
+			assert.Equal(t, tc.wantOutput, result.Output)
+
+			if tc.wantError {
+				require.Error(t, result.Error)
+				var patternErr *PatternMatchError
+				require.ErrorAs(t, result.Error, &patternErr)
+				assert.Equal(t, tc.wantPattern, patternErr.Pattern)
+				assert.Equal(t, tc.wantHelpCmd, patternErr.HelpCmd)
+			} else {
+				require.NoError(t, result.Error)
+			}
+		})
+	}
+}
+
+func TestClaudeExecutor_Run_ErrorPattern_WithSignal(t *testing.T) {
+	// error pattern should still be detected even when output contains a signal
+	jsonStream := `{"type":"content_block_delta","delta":{"type":"text_delta","text":"You've hit your limit <<<RALPHEX:ALL_TASKS_DONE>>>"}}`
+
+	mock := &mocks.CommandRunnerMock{
+		RunFunc: func(_ context.Context, _ string, _ ...string) (io.Reader, func() error, error) {
+			return strings.NewReader(jsonStream), func() error { return nil }, nil
+		},
+	}
+	e := &ClaudeExecutor{
+		cmdRunner:     mock,
+		ErrorPatterns: []string{"hit your limit"},
+	}
+
+	result := e.Run(context.Background(), "test prompt")
+
+	// should have error due to pattern match
+	require.Error(t, result.Error)
+	var patternErr *PatternMatchError
+	require.ErrorAs(t, result.Error, &patternErr)
+	assert.Equal(t, "hit your limit", patternErr.Pattern)
+
+	// should preserve output and signal
+	assert.Contains(t, result.Output, "You've hit your limit")
+	assert.Equal(t, "<<<RALPHEX:ALL_TASKS_DONE>>>", result.Signal)
 }

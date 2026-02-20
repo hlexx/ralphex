@@ -1,15 +1,16 @@
 # codex evaluation prompt
-# this prompt is used when claude evaluates codex (GPT-5.2) review output
+# this prompt is used when claude evaluates codex review output
 # codex runs in phase 3, between first and second claude reviews
 #
 # available variables:
 #   {{PLAN_FILE}} - path to the plan file being executed
 #   {{GOAL}} - human-readable goal description
+#   {{DEFAULT_BRANCH}} - default branch name (main, master, trunk, etc.)
 #   {{CODEX_OUTPUT}} - output from codex code review
 
 External code review evaluation.
 
-Codex (GPT-5.2) reviewed the code and found:
+Codex reviewed the code and found:
 
 ---
 {{CODEX_OUTPUT}}
@@ -37,12 +38,21 @@ Do NOT reject issues just because they existed before this branch - fix them any
 **If there were actionable issues to fix:**
 - Fix them, run tests/linter to verify - ALL tests must pass, ALL linter issues resolved
 - Do NOT commit yet - more codex iterations may follow
-- STOP and let the external loop run codex again
+- STOP here and DO NOT output any signal - the external loop will run codex again to verify fixes
+- NEVER output CODEX_REVIEW_DONE after fixing issues
+
+**If you dismissed ALL findings as invalid** (codex reported issues but none are actionable):
+- Explain why each finding is invalid
+- Do NOT commit anything
+- Do NOT output any signal
+- STOP here — the loop will re-run the external tool with your explanations for context
 
 **If Codex reports NO actionable issues** (empty output, "no issues found", "NO ISSUES FOUND"):
 - Run `git diff` to review ALL uncommitted changes (accumulated fixes from multiple iterations)
 - Commit all fixes with message: "fix: address codex review findings"
 - Output exactly: <<<RALPHEX:CODEX_REVIEW_DONE>>>
+
+CRITICAL: The CODEX_REVIEW_DONE signal means "codex found nothing to fix". Only output it when codex itself reported no issues. If you fixed anything, do NOT output the signal.
 
 CRITICAL: Never run codex commands yourself. The external loop handles codex execution.
 

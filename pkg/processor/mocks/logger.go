@@ -6,7 +6,7 @@ package mocks
 import (
 	"sync"
 
-	"github.com/umputun/ralphex/pkg/progress"
+	"github.com/umputun/ralphex/pkg/status"
 )
 
 // LoggerMock is a mock implementation of processor.Logger.
@@ -15,6 +15,15 @@ import (
 //
 //		// make and configure a mocked processor.Logger
 //		mockedLogger := &LoggerMock{
+//			LogAnswerFunc: func(answer string)  {
+//				panic("mock out the LogAnswer method")
+//			},
+//			LogDraftReviewFunc: func(action string, feedback string)  {
+//				panic("mock out the LogDraftReview method")
+//			},
+//			LogQuestionFunc: func(question string, options []string)  {
+//				panic("mock out the LogQuestion method")
+//			},
 //			PathFunc: func() string {
 //				panic("mock out the Path method")
 //			},
@@ -27,11 +36,8 @@ import (
 //			PrintRawFunc: func(format string, args ...any)  {
 //				panic("mock out the PrintRaw method")
 //			},
-//			PrintSectionFunc: func(name string)  {
+//			PrintSectionFunc: func(section status.Section)  {
 //				panic("mock out the PrintSection method")
-//			},
-//			SetPhaseFunc: func(phase progress.Phase)  {
-//				panic("mock out the SetPhase method")
 //			},
 //		}
 //
@@ -40,6 +46,15 @@ import (
 //
 //	}
 type LoggerMock struct {
+	// LogAnswerFunc mocks the LogAnswer method.
+	LogAnswerFunc func(answer string)
+
+	// LogDraftReviewFunc mocks the LogDraftReview method.
+	LogDraftReviewFunc func(action string, feedback string)
+
+	// LogQuestionFunc mocks the LogQuestion method.
+	LogQuestionFunc func(question string, options []string)
+
 	// PathFunc mocks the Path method.
 	PathFunc func() string
 
@@ -53,13 +68,29 @@ type LoggerMock struct {
 	PrintRawFunc func(format string, args ...any)
 
 	// PrintSectionFunc mocks the PrintSection method.
-	PrintSectionFunc func(name string)
-
-	// SetPhaseFunc mocks the SetPhase method.
-	SetPhaseFunc func(phase progress.Phase)
+	PrintSectionFunc func(section status.Section)
 
 	// calls tracks calls to the methods.
 	calls struct {
+		// LogAnswer holds details about calls to the LogAnswer method.
+		LogAnswer []struct {
+			// Answer is the answer argument value.
+			Answer string
+		}
+		// LogDraftReview holds details about calls to the LogDraftReview method.
+		LogDraftReview []struct {
+			// Action is the action argument value.
+			Action string
+			// Feedback is the feedback argument value.
+			Feedback string
+		}
+		// LogQuestion holds details about calls to the LogQuestion method.
+		LogQuestion []struct {
+			// Question is the question argument value.
+			Question string
+			// Options is the options argument value.
+			Options []string
+		}
 		// Path holds details about calls to the Path method.
 		Path []struct {
 		}
@@ -84,21 +115,122 @@ type LoggerMock struct {
 		}
 		// PrintSection holds details about calls to the PrintSection method.
 		PrintSection []struct {
-			// Name is the name argument value.
-			Name string
-		}
-		// SetPhase holds details about calls to the SetPhase method.
-		SetPhase []struct {
-			// Phase is the phase argument value.
-			Phase progress.Phase
+			// Section is the section argument value.
+			Section status.Section
 		}
 	}
-	lockPath         sync.RWMutex
-	lockPrint        sync.RWMutex
-	lockPrintAligned sync.RWMutex
-	lockPrintRaw     sync.RWMutex
-	lockPrintSection sync.RWMutex
-	lockSetPhase     sync.RWMutex
+	lockLogAnswer      sync.RWMutex
+	lockLogDraftReview sync.RWMutex
+	lockLogQuestion    sync.RWMutex
+	lockPath           sync.RWMutex
+	lockPrint          sync.RWMutex
+	lockPrintAligned   sync.RWMutex
+	lockPrintRaw       sync.RWMutex
+	lockPrintSection   sync.RWMutex
+}
+
+// LogAnswer calls LogAnswerFunc.
+func (mock *LoggerMock) LogAnswer(answer string) {
+	if mock.LogAnswerFunc == nil {
+		panic("LoggerMock.LogAnswerFunc: method is nil but Logger.LogAnswer was just called")
+	}
+	callInfo := struct {
+		Answer string
+	}{
+		Answer: answer,
+	}
+	mock.lockLogAnswer.Lock()
+	mock.calls.LogAnswer = append(mock.calls.LogAnswer, callInfo)
+	mock.lockLogAnswer.Unlock()
+	mock.LogAnswerFunc(answer)
+}
+
+// LogAnswerCalls gets all the calls that were made to LogAnswer.
+// Check the length with:
+//
+//	len(mockedLogger.LogAnswerCalls())
+func (mock *LoggerMock) LogAnswerCalls() []struct {
+	Answer string
+} {
+	var calls []struct {
+		Answer string
+	}
+	mock.lockLogAnswer.RLock()
+	calls = mock.calls.LogAnswer
+	mock.lockLogAnswer.RUnlock()
+	return calls
+}
+
+// LogDraftReview calls LogDraftReviewFunc.
+func (mock *LoggerMock) LogDraftReview(action string, feedback string) {
+	if mock.LogDraftReviewFunc == nil {
+		panic("LoggerMock.LogDraftReviewFunc: method is nil but Logger.LogDraftReview was just called")
+	}
+	callInfo := struct {
+		Action   string
+		Feedback string
+	}{
+		Action:   action,
+		Feedback: feedback,
+	}
+	mock.lockLogDraftReview.Lock()
+	mock.calls.LogDraftReview = append(mock.calls.LogDraftReview, callInfo)
+	mock.lockLogDraftReview.Unlock()
+	mock.LogDraftReviewFunc(action, feedback)
+}
+
+// LogDraftReviewCalls gets all the calls that were made to LogDraftReview.
+// Check the length with:
+//
+//	len(mockedLogger.LogDraftReviewCalls())
+func (mock *LoggerMock) LogDraftReviewCalls() []struct {
+	Action   string
+	Feedback string
+} {
+	var calls []struct {
+		Action   string
+		Feedback string
+	}
+	mock.lockLogDraftReview.RLock()
+	calls = mock.calls.LogDraftReview
+	mock.lockLogDraftReview.RUnlock()
+	return calls
+}
+
+// LogQuestion calls LogQuestionFunc.
+func (mock *LoggerMock) LogQuestion(question string, options []string) {
+	if mock.LogQuestionFunc == nil {
+		panic("LoggerMock.LogQuestionFunc: method is nil but Logger.LogQuestion was just called")
+	}
+	callInfo := struct {
+		Question string
+		Options  []string
+	}{
+		Question: question,
+		Options:  options,
+	}
+	mock.lockLogQuestion.Lock()
+	mock.calls.LogQuestion = append(mock.calls.LogQuestion, callInfo)
+	mock.lockLogQuestion.Unlock()
+	mock.LogQuestionFunc(question, options)
+}
+
+// LogQuestionCalls gets all the calls that were made to LogQuestion.
+// Check the length with:
+//
+//	len(mockedLogger.LogQuestionCalls())
+func (mock *LoggerMock) LogQuestionCalls() []struct {
+	Question string
+	Options  []string
+} {
+	var calls []struct {
+		Question string
+		Options  []string
+	}
+	mock.lockLogQuestion.RLock()
+	calls = mock.calls.LogQuestion
+	mock.lockLogQuestion.RUnlock()
+	return calls
 }
 
 // Path calls PathFunc.
@@ -233,19 +365,19 @@ func (mock *LoggerMock) PrintRawCalls() []struct {
 }
 
 // PrintSection calls PrintSectionFunc.
-func (mock *LoggerMock) PrintSection(name string) {
+func (mock *LoggerMock) PrintSection(section status.Section) {
 	if mock.PrintSectionFunc == nil {
 		panic("LoggerMock.PrintSectionFunc: method is nil but Logger.PrintSection was just called")
 	}
 	callInfo := struct {
-		Name string
+		Section status.Section
 	}{
-		Name: name,
+		Section: section,
 	}
 	mock.lockPrintSection.Lock()
 	mock.calls.PrintSection = append(mock.calls.PrintSection, callInfo)
 	mock.lockPrintSection.Unlock()
-	mock.PrintSectionFunc(name)
+	mock.PrintSectionFunc(section)
 }
 
 // PrintSectionCalls gets all the calls that were made to PrintSection.
@@ -253,45 +385,13 @@ func (mock *LoggerMock) PrintSection(name string) {
 //
 //	len(mockedLogger.PrintSectionCalls())
 func (mock *LoggerMock) PrintSectionCalls() []struct {
-	Name string
+	Section status.Section
 } {
 	var calls []struct {
-		Name string
+		Section status.Section
 	}
 	mock.lockPrintSection.RLock()
 	calls = mock.calls.PrintSection
 	mock.lockPrintSection.RUnlock()
-	return calls
-}
-
-// SetPhase calls SetPhaseFunc.
-func (mock *LoggerMock) SetPhase(phase progress.Phase) {
-	if mock.SetPhaseFunc == nil {
-		panic("LoggerMock.SetPhaseFunc: method is nil but Logger.SetPhase was just called")
-	}
-	callInfo := struct {
-		Phase progress.Phase
-	}{
-		Phase: phase,
-	}
-	mock.lockSetPhase.Lock()
-	mock.calls.SetPhase = append(mock.calls.SetPhase, callInfo)
-	mock.lockSetPhase.Unlock()
-	mock.SetPhaseFunc(phase)
-}
-
-// SetPhaseCalls gets all the calls that were made to SetPhase.
-// Check the length with:
-//
-//	len(mockedLogger.SetPhaseCalls())
-func (mock *LoggerMock) SetPhaseCalls() []struct {
-	Phase progress.Phase
-} {
-	var calls []struct {
-		Phase progress.Phase
-	}
-	mock.lockSetPhase.RLock()
-	calls = mock.calls.SetPhase
-	mock.lockSetPhase.RUnlock()
 	return calls
 }

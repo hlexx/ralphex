@@ -21,9 +21,15 @@ make fmt        # format code
 cmd/ralphex/        # main entry point, CLI parsing
 pkg/config/         # configuration loading, defaults, prompts, agents
 pkg/executor/       # claude and codex CLI execution
-pkg/git/            # git operations using go-git library
-pkg/processor/      # orchestration loop, prompts, signals
+pkg/git/            # git operations (external git CLI)
+pkg/input/          # terminal input collector (fzf/fallback, draft review)
+pkg/notify/         # notification delivery (telegram, email, slack, webhook, custom)
+pkg/plan/           # plan file selection and manipulation
+pkg/processor/      # orchestration loop, prompts, signal helpers
 pkg/progress/       # timestamped logging with color
+pkg/status/         # shared execution model types: signals, phases, sections
+pkg/web/            # web dashboard, SSE streaming, session management
+e2e/                # playwright e2e tests for web dashboard
 docs/plans/         # plan files location
 ```
 
@@ -36,21 +42,134 @@ docs/plans/         # plan files location
 
 ## Key Patterns
 
-- Signal-based completion detection (COMPLETED, FAILED, REVIEW_DONE signals)
+- Signal-based completion detection (COMPLETED, FAILED, REVIEW_DONE signals) — constants in `pkg/status/`
+- Plan creation signals: QUESTION (with JSON payload) and PLAN_READY
 - Streaming output with timestamps
 - Progress logging to files
-- Multiple execution modes: full, review-only, codex-only
+- Progress file locking (flock) for active session detection
+- Multiple execution modes: full, tasks-only, review-only, external-only/codex-only, plan creation
+- `--base-ref` flag overrides default branch for review diffs (branch name or commit hash)
+- `--skip-finalize` flag disables finalize step for a single run
+- Custom external review support via scripts (wraps any AI tool)
 - Configuration via `~/.config/ralphex/` with embedded defaults
+- File watching for multi-session dashboard using fsnotify
+- Optional finalize step after successful reviews (disabled by default)
+- Optional notifications on completion/failure via Telegram, Email, Slack, Webhook, or custom script (best-effort, disabled by default)
+
+### Finalize Step
+
+Optional post-completion step that runs after successful review phases:
+
+- Triggers on: ModeFull, ModeReview, ModeCodexOnly (modes with review pipeline)
+- Disabled by default (`finalize_enabled = false` in config)
+- Uses task color (green) for output
+- Runs once, no signal loop - best effort (failures logged but don't block success)
+- Template variables supported (`{{DEFAULT_BRANCH}}`, etc.)
+
+Default behavior (when enabled): rebases commits onto default branch, optionally squashes related commits, runs tests to verify.
+
+Config option: `finalize_enabled = true` in `~/.config/ralphex/config` or `.ralphex/config`
+CLI override: `--skip-finalize` disables finalize for a single run even if enabled in config
+Prompt file: `~/.config/ralphex/prompts/finalize.txt` or `.ralphex/prompts/finalize.txt`
+
+Key files:
+- `pkg/processor/runner.go` - `runFinalize()` method called at end of review modes
+- `pkg/config/defaults/prompts/finalize.txt` - default finalize prompt
+
+### Custom External Review
+
+Allows using custom scripts instead of codex for external code review:
+
+- Config: `external_review_tool = custom` and `custom_review_script = /path/to/script.sh`
+- Script receives prompt file path as single argument
+- Script outputs findings to stdout (ralphex passes them to Claude for evaluation)
+- `{{DIFF_INSTRUCTION}}` template variable expands based on iteration:
+  - First iteration: `git diff main...HEAD` (all feature branch changes)
+  - Subsequent iterations: `git diff` (uncommitted changes only)
+- `--external-only` (-e) flag runs only external review; `--codex-only` (-c) is deprecated alias
+- `codex_enabled = false` backward compat: treated as `external_review_tool = none`
+
+Key files:
+- `pkg/executor/custom.go` - CustomExecutor for running external scripts
+- `pkg/config/defaults/prompts/custom_review.txt` - prompt sent to custom tool
+- `pkg/config/defaults/prompts/custom_eval.txt` - prompt for claude to evaluate custom tool output
+- `pkg/processor/prompts.go` - `getDiffInstruction()` and `replaceVariablesWithIteration()`
+- `pkg/processor/runner.go` - dispatch logic in external review loop
+
+### Git Package API
+
+Single public entry point: `git.NewService(path, logger) (*Service, error)`
+- All git operations are methods on `Service` (CreateBranchForPlan, MovePlanToCompleted, EnsureIgnored, etc.)
+- `Logger` interface for dependency injection, compatible with `*color.Color`
+- Uses `backend` interface internally, implemented by `externalBackend` which shells out to the `git` binary
+
+Key files:
+- `pkg/git/service.go` - `Service` type, `backend` interface
+- `pkg/git/external.go` - git CLI backend (`externalBackend` type)
+
+### Plan Creation Mode
+
+The `--plan "description"` flag enables interactive plan creation:
+
+- Claude explores codebase and asks clarifying questions
+- Questions use QUESTION signal with JSON: `{"question": "...", "options": [...]}`
+- User answers via fzf picker (or numbered fallback); an "Other" option allows typing a custom answer
+- Q&A history stored in progress file for context
+- When ready, Claude emits PLAN_DRAFT signal with full plan content for user review
+- User can Accept, Revise (with feedback), Interactive review, or Reject the draft
+- Interactive review opens `$EDITOR` with the plan content; on save, a unified diff is computed and fed back as revision feedback
+- If revised (manually or via interactive review), feedback is passed to Claude for plan modifications
+- Loop continues until user accepts and Claude emits PLAN_READY signal
+- Plan file written to docs/plans/
+- After completion, prompts user: "Continue with plan implementation?"
+- If "Yes", creates branch and runs full execution mode on the new plan
+
+Plan creation signals:
+- `QUESTION` - asks user a question with options (JSON payload)
+- `PLAN_DRAFT` - presents plan draft for review (plan content between markers)
+- `PLAN_READY` - indicates plan file was written successfully
+
+Key files:
+- `pkg/input/input.go` - terminal input collector (fzf/fallback, draft review)
+- `pkg/status/status.go` - shared signal constants (COMPLETED, FAILED, REVIEW_DONE, etc.)
+- `pkg/processor/signals.go` - signal detection helpers (IsReviewDone, IsCodexDone, etc.)
+- `pkg/config/defaults/prompts/make_plan.txt` - plan creation prompt
+
+## Platform Support
+
+- **Linux/macOS:** fully supported
+- **Windows:** builds and runs, but with limitations:
+  - Process group signals not available (graceful shutdown kills direct process only, not child processes)
+  - File locking not available (active session detection disabled)
+
+### Cross-Platform Development
+
+When adding platform-specific code (syscalls, signals, file locking):
+1. Use build tags: `//go:build !windows` for Unix-only code, `//go:build windows` for Windows stubs
+2. Create separate files: `foo_unix.go` and `foo_windows.go`
+3. Keep common code in the main file, extract platform-specific functions
+4. Windows stubs can be no-ops where functionality is optional
+
+Example files:
+- `pkg/executor/procgroup_unix.go` / `procgroup_windows.go` - process group management
+- `pkg/progress/flock_unix.go` / `flock_windows.go` - file locking helpers
+
+Cross-compile to verify Windows builds:
+```bash
+GOOS=windows GOARCH=amd64 go build ./...
+```
 
 ## Configuration
 
-- Global config location: `~/.config/ralphex/`
+- Global config location: `~/.config/ralphex/` (override with `--config-dir` or `RALPHEX_CONFIG_DIR`)
 - Local config location: `.ralphex/` (per-project, optional)
 - Config file format: INI (using gopkg.in/ini.v1)
 - Embedded defaults in `pkg/config/defaults/`
 - Precedence: CLI flags > local config > global config > embedded defaults
 - Custom prompts: `~/.config/ralphex/prompts/*.txt` or `.ralphex/prompts/*.txt`
 - Custom agents: `~/.config/ralphex/agents/*.txt` or `.ralphex/agents/*.txt`
+- `default_branch` config option: override auto-detected default branch for review diffs
+- Notification config: `notify_channels`, `notify_on_error`, `notify_on_complete`, `notify_timeout_ms`, plus channel-specific `notify_*` fields (see `docs/notifications.md`)
 
 ### Local Project Config (.ralphex/)
 
@@ -73,12 +192,27 @@ project/
 
 ### Config Defaults Behavior
 
-- **config file**: copied on first run, always exists
+- **Commented templates**: config file, prompts, and agents are installed with all content commented out (prefixed `# `)
+- **Auto-update**: files with only comments/whitespace are safe to overwrite on updates - users get new defaults automatically
+- **User customization**: uncommenting any line marks the file as customized - it will be preserved and never overwritten
+- **Fallback loading**: when loading config/prompts/agents, if file content is all-commented (no actual values), embedded defaults are used
+- **Comment handling**: leading meta-comment block (2+ contiguous `# ...` lines at top of file) is stripped when loading prompts and embedded defaults; a single `# Title` at the top is preserved (treated as markdown header, not meta-comment). Full `stripComments` is only used for emptiness detection to trigger fallback
 - **scalars/colors**: per-field fallback to embedded defaults if missing
-- **prompts**: copied if dir empty, per-file fallback to embedded if deleted
-- **agents**: copied if dir empty, no fallback (user controls full set)
 - `*Set` flags (e.g., `CodexEnabledSet`) distinguish explicit `false`/`0` from "not set"
-- If ANY `.txt` exists in prompts/ or agents/, no defaults copied (user manages that dir)
+
+### Error Pattern Detection
+
+Configurable patterns detect rate limit and quota errors in claude/codex output:
+- `claude_error_patterns`: comma-separated patterns for claude (default: "You've hit your limit")
+- `codex_error_patterns`: comma-separated patterns for codex (default: "Rate limit,quota exceeded")
+- Matching is case-insensitive substring search
+- Whitespace is trimmed from each pattern
+- On match, ralphex exits gracefully with pattern info and help command suggestion
+
+Implementation:
+- `PatternMatchError` type in `pkg/executor/executor.go` with `Pattern` and `HelpCmd` fields
+- `checkErrorPatterns()` helper for case-insensitive matching
+- Patterns passed via `ClaudeExecutor.ErrorPatterns` and `CodexExecutor.ErrorPatterns`
 
 ### Agent System
 
@@ -89,12 +223,29 @@ project/
 - `simplification.txt` - detects over-engineering
 - `testing.txt` - reviews test coverage and quality
 
-**Template syntax:** Use `{{agent:name}}` in prompt files to reference agents. Each reference expands to Task tool instructions that tell Claude Code to run that agent.
+**Frontmatter options:** Agent files support optional YAML frontmatter (`---` delimited) for per-agent model and subagent type:
+- `model: haiku|sonnet|opus` — Claude model for this agent
+- `agent: <type>` — Claude Code Task tool subagent type (default: `general-purpose`)
+- Parsed by `parseOptions()` in `pkg/config/frontmatter.go`, validated by `Options.Validate()`
+- Full model IDs (e.g. `claude-sonnet-4-5-20250929`) are normalized to short keywords (`sonnet`)
+- Invalid model values are dropped with a warning, falling back to defaults
+
+**Template variables:** Prompt files support variable expansion via `replacePromptVariables()` in `pkg/processor/prompts.go`:
+- `{{PLAN_FILE}}` - path to plan file or fallback text
+- `{{PROGRESS_FILE}}` - path to progress log or fallback text
+- `{{GOAL}}` - human-readable goal (plan-based or branch comparison)
+- `{{DEFAULT_BRANCH}}` - detected default branch (main, master, origin/main, etc.), overridable via `--base-ref` CLI flag or `default_branch` config option
+- `{{DIFF_INSTRUCTION}}` - git diff command for current iteration (first: `git diff main...HEAD`, subsequent: `git diff`)
+- `{{agent:name}}` - expands to Task tool instructions for the named agent
+
+Variables are also expanded inside agent content, so custom agents can use `{{DEFAULT_BRANCH}}` etc.
 
 **Customization:**
 - Edit files in `~/.config/ralphex/agents/` to modify agent prompts
 - Add new `.txt` files to create custom agents
-- Delete ALL `.txt` files from the directory and restart ralphex to restore defaults
+- Run `ralphex --reset` to interactively restore defaults, or delete ALL `.txt` files manually
+- Run `ralphex --dump-defaults <dir>` to extract raw embedded defaults for comparison or merging
+- Use `/ralphex-update` skill for smart merging of updated defaults into customized configs
 - Alternatively, reference agents installed in your Claude Code directly in prompt files (like `qa-expert`, `go-smells-expert`)
 
 ## Testing
@@ -103,6 +254,23 @@ project/
 go test ./...           # run all tests
 go test -cover ./...    # with coverage
 ```
+
+### Web UI E2E Tests
+
+Playwright-based e2e tests for the web dashboard are in `e2e/` directory:
+
+```bash
+# install playwright browsers (first time only)
+go run github.com/playwright-community/playwright-go/cmd/playwright@latest install --with-deps chromium
+
+# run web ui e2e tests
+go test -tags=e2e -timeout=10m -count=1 -v ./e2e/...
+
+# run with visible browser (for debugging)
+E2E_HEADLESS=false go test -tags=e2e -timeout=10m -count=1 -v ./e2e/...
+```
+
+Tests cover: dashboard loading, SSE connection and reconnection, phase sections, plan panel, session sidebar, keyboard shortcuts, error/warning event rendering, signal events (COMPLETED/FAILED/REVIEW_DONE), task and iteration boundary rendering, auto-scroll behavior, plan parsing edge cases.
 
 ## End-to-End Testing
 
@@ -158,10 +326,10 @@ go run <ralphex-project-root>/cmd/ralphex --codex-only
 
 ```bash
 # live stream (use actual filename from ralphex output)
-tail -f progress-fix-issues.txt
+tail -f .ralphex/progress/progress-fix-issues.txt
 
 # recent activity
-tail -50 progress-*.txt
+tail -50 .ralphex/progress/progress-*.txt
 ```
 
 ## Development Workflow
@@ -171,7 +339,7 @@ tail -50 progress-*.txt
 1. Run unit tests: `make test`
 2. Run linter: `make lint`
 3. **MUST** run end-to-end test with toy project (see above)
-4. Monitor `tail -f progress-*.txt` to verify output streaming works
+4. Monitor `tail -f .ralphex/progress/progress-*.txt` to verify output streaming works
 
 Unit tests don't verify actual codex/claude integration or output formatting. The toy project test is the only way to verify streaming output works correctly.
 
@@ -212,5 +380,22 @@ If you're an AI agent preparing a contribution, complete this checklist:
 ## MkDocs Site
 
 - Site source: `site/` directory with `mkdocs.yml`
+- **Landing page**: `site/docs/index.html` is a manually crafted HTML page, not generated by MkDocs. Edit it directly to update the landing page.
 - Template overrides: `site/overrides/` with `custom_dir: overrides` in mkdocs.yml
 - **CI constraint**: Cloudflare Pages uses mkdocs-material 9.2.x, must use `materialx.emoji` syntax (not `material.extensions.emoji` which requires 9.4+)
+- **Raw .md files**: MkDocs renders ALL `.md` files in `docs_dir` as HTML pages. To serve raw markdown (e.g., `assets/claude/*.md` for Claude Code skills), copy them AFTER `mkdocs build` - see `prep_site` target in Makefile
+
+## Testing Safety Rules
+
+- **CRITICAL: Tests must NEVER touch real user config directory** (`~/.config/ralphex/`)
+- All tests MUST use `t.TempDir()` for any file operations
+- Config pollution is hard to debug - corrupted files cause cryptic errors
+- Verify tests are clean: compare MD5 checksums of config files before/after `go test ./...`
+
+## Workflow Rules
+
+- **Plugin version**: bump `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` versions on release if skill files (`assets/claude/`) changed since last plugin version bump
+- **CHANGELOG**: Never modify during development - updates are part of release process only
+- **Version sections**: Never add entries to existing version sections - versions are immutable once released
+- **Linter warnings**: Add exclusions to `.golangci.yml` instead of `_, _ =` prefixes for fmt.Fprintf/Fprintln
+- **Exporting functions**: When changing visibility (lowercase to uppercase), check ALL callers including test files

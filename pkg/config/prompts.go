@@ -19,6 +19,10 @@ type Prompts struct {
 	ReviewFirstCodex  string
 	ReviewSecondCodex string
 	Codex             string
+	MakePlan          string
+	Finalize          string
+	CustomReview      string
+	CustomEval        string
 }
 
 // promptLoader implements PromptLoader with embedded filesystem fallback.
@@ -66,6 +70,26 @@ func (p *promptLoader) Load(localDir, globalDir string) (Prompts, error) {
 		return Prompts{}, fmt.Errorf("load codex prompt: %w", err)
 	}
 
+	prompts.MakePlan, err = p.loadPromptWithLocalFallback(localDir, globalDir, makePlanPromptFile)
+	if err != nil {
+		return Prompts{}, fmt.Errorf("load make_plan prompt: %w", err)
+	}
+
+	prompts.Finalize, err = p.loadPromptWithLocalFallback(localDir, globalDir, finalizePromptFile)
+	if err != nil {
+		return Prompts{}, fmt.Errorf("load finalize prompt: %w", err)
+	}
+
+	prompts.CustomReview, err = p.loadPromptWithLocalFallback(localDir, globalDir, customReviewPromptFile)
+	if err != nil {
+		return Prompts{}, fmt.Errorf("load custom_review prompt: %w", err)
+	}
+
+	prompts.CustomEval, err = p.loadPromptWithLocalFallback(localDir, globalDir, customEvalPromptFile)
+	if err != nil {
+		return Prompts{}, fmt.Errorf("load custom_eval prompt: %w", err)
+	}
+
 	return prompts, nil
 }
 
@@ -102,7 +126,8 @@ func (p *promptLoader) loadPromptWithFallback(userPath, embedPath string) (strin
 
 // loadPromptFile reads a prompt file from disk.
 // returns empty string (not error) if file doesn't exist.
-// comment lines (starting with #) are stripped.
+// returns empty string if file contains only comment lines (starting with #),
+// which triggers fallback to embedded defaults in the caller.
 func (p *promptLoader) loadPromptFile(path string) (string, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is constructed internally
 	if err != nil {
@@ -111,12 +136,15 @@ func (p *promptLoader) loadPromptFile(path string) (string, error) {
 		}
 		return "", fmt.Errorf("read prompt file %s: %w", path, err)
 	}
-	return strings.TrimSpace(stripComments(string(data))), nil
+	content := normalizeCRLF(string(data))
+	if strings.TrimSpace(stripComments(content)) == "" {
+		return "", nil // all-commented file, trigger fallback to embedded
+	}
+	return strings.TrimSpace(stripLeadingComments(content)), nil
 }
 
 // loadPromptFromEmbedFS reads a prompt file from an embedded filesystem.
 // returns empty string (not error) if file doesn't exist.
-// comment lines (starting with #) are stripped.
 func (p *promptLoader) loadPromptFromEmbedFS(path string) (string, error) {
 	data, err := p.embedFS.ReadFile(path)
 	if err != nil {
@@ -125,7 +153,56 @@ func (p *promptLoader) loadPromptFromEmbedFS(path string) (string, error) {
 		}
 		return "", fmt.Errorf("read embedded prompt %s: %w", path, err)
 	}
-	return strings.TrimSpace(stripComments(string(data))), nil
+	return strings.TrimSpace(stripLeadingComments(normalizeCRLF(string(data)))), nil
+}
+
+// normalizeCRLF converts Windows line endings (CRLF) to Unix (LF).
+func normalizeCRLF(content string) string {
+	return strings.ReplaceAll(content, "\r\n", "\n")
+}
+
+// stripLeadingComments removes the contiguous block of comment lines (starting with #)
+// from the beginning of content. only strips when there are 2+ contiguous comment lines,
+// so a single "# Title" (markdown header) at the top is preserved.
+// stops at the first non-comment line, including blank lines.
+func stripLeadingComments(content string) string {
+	lines := strings.Split(content, "\n")
+	commentCount := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			break
+		}
+		commentCount++
+	}
+	if commentCount < 2 {
+		return content // single or no leading comment, preserve as-is (likely markdown header)
+	}
+	// strip the contiguous comment block
+	return strings.TrimLeft(strings.Join(lines[commentCount:], "\n"), "\n")
+}
+
+// stripLeadingCommentLines removes all contiguous leading comment lines (starting with #),
+// regardless of count (even a single line). used by agent frontmatter detection where
+// any number of comment lines before "---" should be stripped to reveal frontmatter.
+// unlike stripLeadingComments which preserves a single "# Title" for prompt content,
+// this function strips all leading comments unconditionally.
+func stripLeadingCommentLines(content string) string {
+	lines := strings.Split(content, "\n")
+	commentCount := 0
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !strings.HasPrefix(trimmed, "#") {
+			break
+		}
+		commentCount++
+	}
+	if commentCount == 0 {
+		return content
+	}
+	rest := strings.Join(lines[commentCount:], "\n")
+	// trim leading whitespace-only lines and newlines so frontmatter "---" is at position 0
+	return strings.TrimLeft(rest, " \t\n")
 }
 
 // stripComments removes lines starting with # (comment lines) from content.
@@ -135,7 +212,8 @@ func stripComments(content string) string {
 	// normalize line endings: convert CRLF to LF
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 
-	var lines []string
+	// pre-allocate with estimated capacity (count newlines + 1)
+	lines := make([]string, 0, strings.Count(content, "\n")+1)
 	for line := range strings.SplitSeq(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") {

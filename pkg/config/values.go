@@ -4,6 +4,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/ini.v1"
 )
@@ -15,6 +16,7 @@ import (
 type Values struct {
 	ClaudeCommand        string
 	ClaudeArgs           string
+	ClaudeErrorPatterns  []string // patterns to detect in claude output (e.g., rate limit messages)
 	CodexEnabled         bool
 	CodexEnabledSet      bool // tracks if codex_enabled was explicitly set
 	CodexCommand         string
@@ -23,11 +25,45 @@ type Values struct {
 	CodexTimeoutMs       int
 	CodexTimeoutMsSet    bool // tracks if codex_timeout_ms was explicitly set
 	CodexSandbox         string
+	CodexErrorPatterns   []string // patterns to detect in codex output (e.g., rate limit messages)
+	ExternalReviewTool   string   // "codex", "custom", or "none"
+	CustomReviewScript   string   // path to custom review script (when ExternalReviewTool = "custom")
 	IterationDelayMs     int
 	IterationDelayMsSet  bool // tracks if iteration_delay_ms was explicitly set
 	TaskRetryCount       int
 	TaskRetryCountSet    bool // tracks if task_retry_count was explicitly set
+	FinalizeEnabled      bool
+	FinalizeEnabledSet   bool // tracks if finalize_enabled was explicitly set
 	PlansDir             string
+	DefaultBranch        string   // override auto-detected default branch
+	WatchDirs            []string // directories to watch for progress files
+
+	// notification settings
+	NotifyChannels        []string // channels to use: telegram, email, webhook, slack, custom
+	NotifyChannelsSet     bool     // tracks if notify_channels was explicitly set (allows empty to disable)
+	NotifyOnError         bool
+	NotifyOnErrorSet      bool // tracks if notify_on_error was explicitly set
+	NotifyOnComplete      bool
+	NotifyOnCompleteSet   bool // tracks if notify_on_complete was explicitly set
+	NotifyTimeoutMs       int
+	NotifyTimeoutMsSet    bool // tracks if notify_timeout_ms was explicitly set
+	NotifyTelegramToken   string
+	NotifyTelegramChat    string
+	NotifySlackToken      string
+	NotifySlackChannel    string
+	NotifySMTPHost        string
+	NotifySMTPPort        int
+	NotifySMTPPortSet     bool // tracks if notify_smtp_port was explicitly set
+	NotifySMTPUsername    string
+	NotifySMTPPassword    string
+	NotifySMTPStartTLS    bool
+	NotifySMTPStartTLSSet bool // tracks if notify_smtp_starttls was explicitly set
+	NotifyEmailFrom       string
+	NotifyEmailTo         []string // comma-separated in config
+	NotifyEmailToSet      bool     // tracks if notify_email_to was explicitly set (allows empty to disable)
+	NotifyWebhookURLs     []string // comma-separated in config
+	NotifyWebhookURLsSet  bool     // tracks if notify_webhook_urls was explicitly set (allows empty to disable)
+	NotifyCustomScript    string   // path to custom notification script (tilde-expanded)
 }
 
 // valuesLoader implements ValuesLoader with embedded filesystem fallback.
@@ -72,7 +108,8 @@ func (vl *valuesLoader) Load(localConfigPath, globalConfigPath string) (Values, 
 }
 
 // parseValuesFromFile reads a config file and parses it into Values.
-// returns empty Values (not error) if file doesn't exist.
+// returns empty Values (not error) if file doesn't exist or contains only comments/whitespace.
+// this enables fallback to embedded defaults for files that are commented templates.
 func (vl *valuesLoader) parseValuesFromFile(path string) (Values, error) {
 	if path == "" {
 		return Values{}, nil
@@ -84,6 +121,13 @@ func (vl *valuesLoader) parseValuesFromFile(path string) (Values, error) {
 			return Values{}, nil
 		}
 		return Values{}, fmt.Errorf("read config %s: %w", path, err)
+	}
+
+	// strip comments and check if anything remains
+	// if only comments/whitespace, return empty Values to fall back to embedded defaults
+	stripped := stripComments(string(data))
+	if strings.TrimSpace(stripped) == "" {
+		return Values{}, nil
 	}
 
 	return vl.parseValuesFromBytes(data)
@@ -99,6 +143,8 @@ func (vl *valuesLoader) parseValuesFromEmbedded() (Values, error) {
 }
 
 // parseValuesFromBytes parses configuration from a byte slice into Values.
+//
+//nolint:gocyclo // adding watch_dirs pushed complexity over threshold; splitting would hurt readability
 func (vl *valuesLoader) parseValuesFromBytes(data []byte) (Values, error) {
 	// ignoreInlineComment: true prevents # from being treated as inline comment marker
 	cfg, err := ini.LoadSources(ini.LoadOptions{IgnoreInlineComment: true}, data)
@@ -150,6 +196,14 @@ func (vl *valuesLoader) parseValuesFromBytes(data []byte) (Values, error) {
 		values.CodexSandbox = key.String()
 	}
 
+	// external review settings
+	if key, err := section.GetKey("external_review_tool"); err == nil {
+		values.ExternalReviewTool = key.String()
+	}
+	if key, err := section.GetKey("custom_review_script"); err == nil {
+		values.CustomReviewScript = expandTilde(key.String())
+	}
+
 	// timing settings
 	if key, err := section.GetKey("iteration_delay_ms"); err == nil {
 		val, intErr := key.Int()
@@ -174,9 +228,61 @@ func (vl *valuesLoader) parseValuesFromBytes(data []byte) (Values, error) {
 		values.TaskRetryCountSet = true
 	}
 
+	// finalize settings
+	if key, err := section.GetKey("finalize_enabled"); err == nil {
+		val, boolErr := key.Bool()
+		if boolErr != nil {
+			return Values{}, fmt.Errorf("invalid finalize_enabled: %w", boolErr)
+		}
+		values.FinalizeEnabled = val
+		values.FinalizeEnabledSet = true
+	}
+
 	// paths
 	if key, err := section.GetKey("plans_dir"); err == nil {
 		values.PlansDir = key.String()
+	}
+	if key, err := section.GetKey("default_branch"); err == nil {
+		values.DefaultBranch = strings.TrimSpace(key.String())
+	}
+
+	// watch directories (comma-separated)
+	if key, err := section.GetKey("watch_dirs"); err == nil {
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.WatchDirs = append(values.WatchDirs, t)
+				}
+			}
+		}
+	}
+
+	// notification settings
+	if err := parseNotifyValues(section, &values); err != nil {
+		return Values{}, err
+	}
+
+	// error patterns (comma-separated)
+	if key, err := section.GetKey("claude_error_patterns"); err == nil {
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.ClaudeErrorPatterns = append(values.ClaudeErrorPatterns, t)
+				}
+			}
+		}
+	}
+	if key, err := section.GetKey("codex_error_patterns"); err == nil {
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.CodexErrorPatterns = append(values.CodexErrorPatterns, t)
+				}
+			}
+		}
 	}
 
 	return values, nil
@@ -210,6 +316,12 @@ func (dst *Values) mergeFrom(src *Values) {
 	if src.CodexSandbox != "" {
 		dst.CodexSandbox = src.CodexSandbox
 	}
+	if src.ExternalReviewTool != "" {
+		dst.ExternalReviewTool = src.ExternalReviewTool
+	}
+	if src.CustomReviewScript != "" {
+		dst.CustomReviewScript = src.CustomReviewScript
+	}
 	if src.IterationDelayMsSet {
 		dst.IterationDelayMs = src.IterationDelayMs
 		dst.IterationDelayMsSet = true
@@ -218,7 +330,233 @@ func (dst *Values) mergeFrom(src *Values) {
 		dst.TaskRetryCount = src.TaskRetryCount
 		dst.TaskRetryCountSet = true
 	}
+	if src.FinalizeEnabledSet {
+		dst.FinalizeEnabled = src.FinalizeEnabled
+		dst.FinalizeEnabledSet = true
+	}
 	if src.PlansDir != "" {
 		dst.PlansDir = src.PlansDir
 	}
+	if src.DefaultBranch != "" {
+		dst.DefaultBranch = src.DefaultBranch
+	}
+	if len(src.WatchDirs) > 0 {
+		dst.WatchDirs = src.WatchDirs
+	}
+	if len(src.ClaudeErrorPatterns) > 0 {
+		dst.ClaudeErrorPatterns = src.ClaudeErrorPatterns
+	}
+	if len(src.CodexErrorPatterns) > 0 {
+		dst.CodexErrorPatterns = src.CodexErrorPatterns
+	}
+
+	dst.mergeNotifyFrom(src)
+}
+
+// mergeNotifyFrom merges notification-related fields from src into dst.
+// called from mergeFrom to manage function length.
+func (dst *Values) mergeNotifyFrom(src *Values) {
+	if src.NotifyChannelsSet {
+		dst.NotifyChannels = src.NotifyChannels
+		dst.NotifyChannelsSet = true
+	}
+	if src.NotifyOnErrorSet {
+		dst.NotifyOnError = src.NotifyOnError
+		dst.NotifyOnErrorSet = true
+	}
+	if src.NotifyOnCompleteSet {
+		dst.NotifyOnComplete = src.NotifyOnComplete
+		dst.NotifyOnCompleteSet = true
+	}
+	if src.NotifyTimeoutMsSet {
+		dst.NotifyTimeoutMs = src.NotifyTimeoutMs
+		dst.NotifyTimeoutMsSet = true
+	}
+	if src.NotifyTelegramToken != "" {
+		dst.NotifyTelegramToken = src.NotifyTelegramToken
+	}
+	if src.NotifyTelegramChat != "" {
+		dst.NotifyTelegramChat = src.NotifyTelegramChat
+	}
+	if src.NotifySlackToken != "" {
+		dst.NotifySlackToken = src.NotifySlackToken
+	}
+	if src.NotifySlackChannel != "" {
+		dst.NotifySlackChannel = src.NotifySlackChannel
+	}
+	if src.NotifySMTPHost != "" {
+		dst.NotifySMTPHost = src.NotifySMTPHost
+	}
+	if src.NotifySMTPPortSet {
+		dst.NotifySMTPPort = src.NotifySMTPPort
+		dst.NotifySMTPPortSet = true
+	}
+	if src.NotifySMTPUsername != "" {
+		dst.NotifySMTPUsername = src.NotifySMTPUsername
+	}
+	if src.NotifySMTPPassword != "" {
+		dst.NotifySMTPPassword = src.NotifySMTPPassword
+	}
+	if src.NotifySMTPStartTLSSet {
+		dst.NotifySMTPStartTLS = src.NotifySMTPStartTLS
+		dst.NotifySMTPStartTLSSet = true
+	}
+	if src.NotifyEmailFrom != "" {
+		dst.NotifyEmailFrom = src.NotifyEmailFrom
+	}
+	if src.NotifyEmailToSet {
+		dst.NotifyEmailTo = src.NotifyEmailTo
+		dst.NotifyEmailToSet = true
+	}
+	if src.NotifyWebhookURLsSet {
+		dst.NotifyWebhookURLs = src.NotifyWebhookURLs
+		dst.NotifyWebhookURLsSet = true
+	}
+	if src.NotifyCustomScript != "" {
+		dst.NotifyCustomScript = src.NotifyCustomScript
+	}
+}
+
+// parseNotifyValues extracts notification-related settings from an INI section into Values.
+// called from parseValuesFromBytes to manage cyclomatic complexity.
+func parseNotifyValues(section *ini.Section, values *Values) error {
+	// notification channels (comma-separated)
+	if key, err := section.GetKey("notify_channels"); err == nil {
+		values.NotifyChannelsSet = true // key present, even if empty (allows disabling)
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.NotifyChannels = append(values.NotifyChannels, t)
+				}
+			}
+		}
+	}
+
+	if key, err := section.GetKey("notify_on_error"); err == nil {
+		val, boolErr := key.Bool()
+		if boolErr != nil {
+			return fmt.Errorf("invalid notify_on_error: %w", boolErr)
+		}
+		values.NotifyOnError = val
+		values.NotifyOnErrorSet = true
+	}
+	if key, err := section.GetKey("notify_on_complete"); err == nil {
+		val, boolErr := key.Bool()
+		if boolErr != nil {
+			return fmt.Errorf("invalid notify_on_complete: %w", boolErr)
+		}
+		values.NotifyOnComplete = val
+		values.NotifyOnCompleteSet = true
+	}
+	if key, err := section.GetKey("notify_timeout_ms"); err == nil {
+		val, intErr := key.Int()
+		if intErr != nil {
+			return fmt.Errorf("invalid notify_timeout_ms: %w", intErr)
+		}
+		if val < 0 {
+			return fmt.Errorf("invalid notify_timeout_ms: must be non-negative, got %d", val)
+		}
+		values.NotifyTimeoutMs = val
+		values.NotifyTimeoutMsSet = true
+	}
+
+	// telegram settings
+	if key, err := section.GetKey("notify_telegram_token"); err == nil {
+		values.NotifyTelegramToken = key.String()
+	}
+	if key, err := section.GetKey("notify_telegram_chat"); err == nil {
+		values.NotifyTelegramChat = key.String()
+	}
+
+	// slack settings
+	if key, err := section.GetKey("notify_slack_token"); err == nil {
+		values.NotifySlackToken = key.String()
+	}
+	if key, err := section.GetKey("notify_slack_channel"); err == nil {
+		values.NotifySlackChannel = key.String()
+	}
+
+	// custom script (tilde-expanded)
+	if key, err := section.GetKey("notify_custom_script"); err == nil {
+		values.NotifyCustomScript = expandTilde(key.String())
+	}
+
+	return parseNotifyDestValues(section, values)
+}
+
+// parseNotifyDestValues extracts SMTP/email and webhook notification settings from an INI section.
+// split from parseNotifyValues to keep cyclomatic complexity within limits.
+func parseNotifyDestValues(section *ini.Section, values *Values) error {
+	// webhook settings (comma-separated URLs)
+	if key, err := section.GetKey("notify_webhook_urls"); err == nil {
+		values.NotifyWebhookURLsSet = true // key present, even if empty (allows disabling)
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.NotifyWebhookURLs = append(values.NotifyWebhookURLs, t)
+				}
+			}
+		}
+	}
+
+	// smtp/email settings
+	if key, err := section.GetKey("notify_smtp_host"); err == nil {
+		values.NotifySMTPHost = key.String()
+	}
+	if key, err := section.GetKey("notify_smtp_port"); err == nil {
+		val, intErr := key.Int()
+		if intErr != nil {
+			return fmt.Errorf("invalid notify_smtp_port: %w", intErr)
+		}
+		if val < 0 {
+			return fmt.Errorf("invalid notify_smtp_port: must be non-negative, got %d", val)
+		}
+		values.NotifySMTPPort = val
+		values.NotifySMTPPortSet = true
+	}
+	if key, err := section.GetKey("notify_smtp_username"); err == nil {
+		values.NotifySMTPUsername = key.String()
+	}
+	if key, err := section.GetKey("notify_smtp_password"); err == nil {
+		values.NotifySMTPPassword = key.String()
+	}
+	if key, err := section.GetKey("notify_smtp_starttls"); err == nil {
+		val, boolErr := key.Bool()
+		if boolErr != nil {
+			return fmt.Errorf("invalid notify_smtp_starttls: %w", boolErr)
+		}
+		values.NotifySMTPStartTLS = val
+		values.NotifySMTPStartTLSSet = true
+	}
+	if key, err := section.GetKey("notify_email_from"); err == nil {
+		values.NotifyEmailFrom = key.String()
+	}
+	if key, err := section.GetKey("notify_email_to"); err == nil {
+		values.NotifyEmailToSet = true // key present, even if empty (allows disabling)
+		val := strings.TrimSpace(key.String())
+		if val != "" {
+			for p := range strings.SplitSeq(val, ",") {
+				if t := strings.TrimSpace(p); t != "" {
+					values.NotifyEmailTo = append(values.NotifyEmailTo, t)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+// expandTilde expands a leading ~ in a path to the user's home directory.
+// returns the original path if it doesn't start with ~/ or if home dir is unavailable.
+func expandTilde(path string) string {
+	if !strings.HasPrefix(path, "~/") {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	return home + path[1:] // replace ~ with home, keep the /
 }

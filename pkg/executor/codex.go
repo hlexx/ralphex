@@ -1,11 +1,11 @@
 package executor
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -27,7 +27,17 @@ type CodexRunner interface {
 type execCodexRunner struct{}
 
 func (r *execCodexRunner) Run(ctx context.Context, name string, args ...string) (CodexStreams, func() error, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// check context before starting to avoid spawning a process that will be immediately killed
+	if err := ctx.Err(); err != nil {
+		return CodexStreams{}, nil, fmt.Errorf("context already canceled: %w", err)
+	}
+
+	// use exec.Command (not CommandContext) because we handle cancellation ourselves
+	// to ensure the entire process group is killed, not just the direct child
+	cmd := exec.Command(name, args...) //nolint:noctx // intentional: we handle context cancellation via process group kill
+
+	// create new process group so we can kill all descendants on cleanup
+	setupProcessGroup(cmd)
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -43,19 +53,23 @@ func (r *execCodexRunner) Run(ctx context.Context, name string, args ...string) 
 		return CodexStreams{}, nil, fmt.Errorf("start command: %w", err)
 	}
 
-	return CodexStreams{Stderr: stderr, Stdout: stdout}, cmd.Wait, nil
+	// setup process group cleanup with graceful shutdown on context cancellation
+	cleanup := newProcessGroupCleanup(cmd, ctx.Done())
+
+	return CodexStreams{Stderr: stderr, Stdout: stdout}, cleanup.Wait, nil
 }
 
 // CodexExecutor runs codex CLI commands and filters output.
 type CodexExecutor struct {
 	Command         string            // command to execute, defaults to "codex"
-	Model           string            // model to use, defaults to gpt-5.2-codex
+	Model           string            // model to use, defaults to gpt-5.3-codex
 	ReasoningEffort string            // reasoning effort level, defaults to "xhigh"
 	TimeoutMs       int               // stream idle timeout in ms, defaults to 3600000
 	Sandbox         string            // sandbox mode, defaults to "read-only"
 	ProjectDoc      string            // path to project documentation file
 	OutputHandler   func(text string) // called for each filtered output line in real-time
 	Debug           bool              // enable debug output
+	ErrorPatterns   []string          // patterns to detect in output (e.g., rate limit messages)
 	runner          CodexRunner       // for testing, nil uses default
 }
 
@@ -76,7 +90,7 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 
 	model := e.Model
 	if model == "" {
-		model = "gpt-5.2-codex"
+		model = "gpt-5.3-codex"
 	}
 
 	reasoningEffort := e.ReasoningEffort
@@ -92,6 +106,10 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 	sandbox := e.Sandbox
 	if sandbox == "" {
 		sandbox = "read-only"
+	}
+	// disable sandbox in docker (landlock doesn't work in containers)
+	if os.Getenv("RALPHEX_DOCKER") == "1" {
+		sandbox = "danger-full-access"
 	}
 
 	args := []string{
@@ -119,7 +137,7 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 	}
 
 	// process stderr for progress display (header block + bold summaries)
-	stderrDone := make(chan error, 1)
+	stderrDone := make(chan stderrResult, 1)
 	go func() {
 		stderrDone <- e.processStderr(ctx, streams.Stderr)
 	}()
@@ -128,7 +146,7 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 	stdoutContent, stdoutErr := e.readStdout(streams.Stdout)
 
 	// wait for stderr processing to complete
-	stderrErr := <-stderrDone
+	stderrRes := <-stderrDone
 
 	// wait for command completion
 	waitErr := wait()
@@ -136,53 +154,81 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 	// determine final error (prefer stderr/stdout errors over wait error)
 	var finalErr error
 	switch {
-	case stderrErr != nil && !errors.Is(stderrErr, context.Canceled):
-		finalErr = stderrErr
+	case stderrRes.err != nil && !errors.Is(stderrRes.err, context.Canceled):
+		finalErr = stderrRes.err
 	case stdoutErr != nil:
 		finalErr = stdoutErr
 	case waitErr != nil:
 		if ctx.Err() != nil {
 			finalErr = fmt.Errorf("context error: %w", ctx.Err())
 		} else {
-			finalErr = fmt.Errorf("codex exited with error: %w", waitErr)
+			// include stderr tail for error context when codex exits with non-zero status
+			if len(stderrRes.lastLines) > 0 {
+				finalErr = fmt.Errorf("codex exited with error: %w\nstderr: %s",
+					waitErr, strings.Join(stderrRes.lastLines, "\n"))
+			} else {
+				finalErr = fmt.Errorf("codex exited with error: %w", waitErr)
+			}
 		}
 	}
 
 	// detect signal in stdout (the actual response)
 	signal := detectSignal(stdoutContent)
 
+	// check for error patterns in output
+	if pattern := checkErrorPatterns(stdoutContent, e.ErrorPatterns); pattern != "" {
+		return Result{
+			Output: stdoutContent,
+			Signal: signal,
+			Error:  &PatternMatchError{Pattern: pattern, HelpCmd: "codex /status"},
+		}
+	}
+
 	// return stdout content as the result (the actual answer from codex)
 	return Result{Output: stdoutContent, Signal: signal, Error: finalErr}
 }
 
+// stderrResult holds processed stderr output and any error from reading.
+type stderrResult struct {
+	lastLines []string // last few lines of stderr for error context
+	err       error
+}
+
 // processStderr reads stderr line-by-line, filters for progress display.
 // shows header block (between first two "--------" separators) and bold summaries.
-func (e *CodexExecutor) processStderr(ctx context.Context, r io.Reader) error {
-	state := &codexFilterState{}
-	scanner := bufio.NewScanner(r)
-	// increase buffer size for large output lines (16MB max)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 16*1024*1024)
+// also captures last lines of unfiltered output for error reporting.
+func (e *CodexExecutor) processStderr(ctx context.Context, r io.Reader) stderrResult {
+	const maxTailLines = 5    // keep last N lines for error context
+	const maxLineLength = 256 // truncate long lines to avoid oversized error strings
 
-	for scanner.Scan() {
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("context done: %w", ctx.Err())
-		default:
+	state := &codexFilterState{}
+	var tail []string
+
+	err := readLines(ctx, r, func(line string) {
+		// capture non-empty lines for error context, preserving original formatting
+		if strings.TrimSpace(line) != "" {
+			stored := line
+			if runes := []rune(stored); len(runes) > maxLineLength {
+				stored = string(runes[:maxLineLength]) + "..."
+			}
+			tail = append(tail, stored)
+			if len(tail) > maxTailLines {
+				copy(tail, tail[1:])
+				tail = tail[:maxTailLines]
+			}
 		}
 
-		line := scanner.Text()
 		if show, filtered := e.shouldDisplay(line, state); show {
 			if e.OutputHandler != nil {
 				e.OutputHandler(filtered + "\n")
 			}
 		}
-	}
+	})
 
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("read stderr: %w", err)
+	if err != nil {
+		return stderrResult{lastLines: tail, err: fmt.Errorf("read stderr: %w", err)}
 	}
-	return nil
+	return stderrResult{lastLines: tail}
 }
 
 // readStdout reads the entire stdout content as the final response.

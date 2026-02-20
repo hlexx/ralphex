@@ -10,22 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dustin/go-humanize"
 	"github.com/fatih/color"
 	"golang.org/x/term"
 
 	"github.com/umputun/ralphex/pkg/config"
-)
-
-// Phase represents execution phase for color coding.
-type Phase string
-
-// Phase constants for execution stages.
-const (
-	PhaseTask       Phase = "task"        // execution phase (green)
-	PhaseReview     Phase = "review"      // code review phase (cyan)
-	PhaseCodex      Phase = "codex"       // codex analysis phase (magenta)
-	PhaseClaudeEval Phase = "claude-eval" // claude evaluating codex (bright cyan)
+	"github.com/umputun/ralphex/pkg/status"
 )
 
 // Colors holds all color configuration for output formatting.
@@ -40,14 +29,14 @@ type Colors struct {
 	signal     *color.Color
 	timestamp  *color.Color
 	info       *color.Color
-	phases     map[Phase]*color.Color
+	phases     map[status.Phase]*color.Color
 }
 
 // NewColors creates Colors from config.ColorConfig.
 // all colors must be provided - use config with embedded defaults fallback.
 // panics if any color value is invalid (configuration error).
 func NewColors(cfg config.ColorConfig) *Colors {
-	c := &Colors{phases: make(map[Phase]*color.Color)}
+	c := &Colors{phases: make(map[status.Phase]*color.Color)}
 	c.task = parseColorOrPanic(cfg.Task, "task")
 	c.review = parseColorOrPanic(cfg.Review, "review")
 	c.codex = parseColorOrPanic(cfg.Codex, "codex")
@@ -58,10 +47,12 @@ func NewColors(cfg config.ColorConfig) *Colors {
 	c.timestamp = parseColorOrPanic(cfg.Timestamp, "timestamp")
 	c.info = parseColorOrPanic(cfg.Info, "info")
 
-	c.phases[PhaseTask] = c.task
-	c.phases[PhaseReview] = c.review
-	c.phases[PhaseCodex] = c.codex
-	c.phases[PhaseClaudeEval] = c.claudeEval
+	c.phases[status.PhaseTask] = c.task
+	c.phases[status.PhaseReview] = c.review
+	c.phases[status.PhaseCodex] = c.codex
+	c.phases[status.PhaseClaudeEval] = c.claudeEval
+	c.phases[status.PhasePlan] = c.task     // plan phase uses task color (green)
+	c.phases[status.PhaseFinalize] = c.task // finalize phase uses task color (green)
 
 	return c
 }
@@ -104,7 +95,12 @@ func parseColorOrPanic(s, name string) *color.Color {
 func (c *Colors) Info() *color.Color { return c.info }
 
 // ForPhase returns the color for the given execution phase.
-func (c *Colors) ForPhase(p Phase) *color.Color { return c.phases[p] }
+func (c *Colors) ForPhase(p status.Phase) *color.Color {
+	if clr, ok := c.phases[p]; ok {
+		return clr
+	}
+	return c.task // fallback to task color for unknown/empty phase
+}
 
 // Timestamp returns the timestamp color.
 func (c *Colors) Timestamp() *color.Color { return c.timestamp }
@@ -123,27 +119,31 @@ type Logger struct {
 	file      *os.File
 	stdout    io.Writer
 	startTime time.Time
-	phase     Phase
+	holder    *status.PhaseHolder
 	colors    *Colors
 }
 
 // Config holds logger configuration.
 type Config struct {
-	PlanFile string // plan filename (used to derive progress filename)
-	Mode     string // execution mode: full, review, codex-only
-	Branch   string // current git branch
-	NoColor  bool   // disable color output (sets color.NoColor globally)
+	PlanFile        string // plan filename (used to derive progress filename)
+	PlanDescription string // plan description for plan mode (used for filename)
+	Mode            string // execution mode: full, review, codex-only, plan
+	Branch          string // current git branch
+	NoColor         bool   // disable color output (sets color.NoColor globally)
 }
 
 // NewLogger creates a logger writing to both a progress file and stdout.
+// if the progress file already exists with content, existing log is preserved
+// and a restart separator is written instead of a full header.
 // colors must be provided (created via NewColors from config).
-func NewLogger(cfg Config, colors *Colors) (*Logger, error) {
+// holder is the shared PhaseHolder for reading the current execution phase.
+func NewLogger(cfg Config, colors *Colors, holder *status.PhaseHolder) (*Logger, error) {
 	// set global color setting
 	if cfg.NoColor {
 		color.NoColor = true
 	}
 
-	progressPath := progressFilename(cfg.PlanFile, cfg.Mode)
+	progressPath := progressFilename(cfg.PlanFile, cfg.PlanDescription, cfg.Mode)
 
 	// ensure progress files are tracked by creating parent dir
 	if dir := filepath.Dir(progressPath); dir != "." {
@@ -152,30 +152,56 @@ func NewLogger(cfg Config, colors *Colors) (*Logger, error) {
 		}
 	}
 
-	f, err := os.Create(progressPath) //nolint:gosec // path derived from plan filename
+	f, err := os.OpenFile(progressPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec // path derived from plan filename
 	if err != nil {
-		return nil, fmt.Errorf("create progress file: %w", err)
+		return nil, fmt.Errorf("open progress file: %w", err)
 	}
+
+	// acquire exclusive lock on progress file to signal active session.
+	// the lock is held for the duration of execution and released on Close().
+	// lock MUST be acquired before stat to avoid TOCTOU race:
+	// without this ordering, a concurrent process could stat size==0, block on lock,
+	// then write a full header instead of restart separator after another process already wrote content.
+	if lockErr := lockFile(f); lockErr != nil {
+		f.Close()
+		return nil, fmt.Errorf("acquire file lock: %w", lockErr)
+	}
+	registerActiveLock(f.Name())
+
+	// check if file already has content (restart case) — safe after lock acquisition
+	fi, err := f.Stat()
+	if err != nil {
+		_ = unlockFile(f)
+		unregisterActiveLock(f.Name())
+		f.Close()
+		return nil, fmt.Errorf("stat progress file: %w", err)
+	}
+	restart := fi.Size() > 0
 
 	l := &Logger{
 		file:      f,
 		stdout:    os.Stdout,
 		startTime: time.Now(),
-		phase:     PhaseTask,
+		holder:    holder,
 		colors:    colors,
 	}
 
-	// write header
-	planStr := cfg.PlanFile
-	if planStr == "" {
-		planStr = "(no plan - review only)"
+	if restart {
+		// write restart separator (matches sectionRegex in web parser)
+		l.writeFile("\n\n--- restarted at %s ---\n\n", time.Now().Format("2006-01-02 15:04:05"))
+	} else {
+		// write full header for new file
+		planStr := cfg.PlanFile
+		if planStr == "" {
+			planStr = "(no plan - review only)"
+		}
+		l.writeFile("# Ralphex Progress Log\n")
+		l.writeFile("Plan: %s\n", planStr)
+		l.writeFile("Branch: %s\n", cfg.Branch)
+		l.writeFile("Mode: %s\n", cfg.Mode)
+		l.writeFile("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+		l.writeFile("%s\n\n", strings.Repeat("-", 60))
 	}
-	l.writeFile("# Ralphex Progress Log\n")
-	l.writeFile("Plan: %s\n", planStr)
-	l.writeFile("Branch: %s\n", cfg.Branch)
-	l.writeFile("Mode: %s\n", cfg.Mode)
-	l.writeFile("Started: %s\n", time.Now().Format("2006-01-02 15:04:05"))
-	l.writeFile("%s\n\n", strings.Repeat("-", 60))
 
 	return l, nil
 }
@@ -186,11 +212,6 @@ func (l *Logger) Path() string {
 		return ""
 	}
 	return l.file.Name()
-}
-
-// SetPhase sets the current execution phase for color coding.
-func (l *Logger) SetPhase(phase Phase) {
-	l.phase = phase
 }
 
 // timestampFormat is the format for timestamps: YY-MM-DD HH:MM:SS
@@ -205,7 +226,7 @@ func (l *Logger) Print(format string, args ...any) {
 	l.writeFile("[%s] %s\n", timestamp, msg)
 
 	// write to stdout with color
-	phaseColor := l.colors.ForPhase(l.phase)
+	phaseColor := l.colors.ForPhase(l.holder.Get())
 	tsStr := l.colors.Timestamp().Sprintf("[%s]", timestamp)
 	msgStr := phaseColor.Sprint(msg)
 	l.writeStdout("%s %s\n", tsStr, msgStr)
@@ -219,9 +240,9 @@ func (l *Logger) PrintRaw(format string, args ...any) {
 }
 
 // PrintSection writes a section header without timestamp in yellow.
-// format: "\n--- {name} ---\n"
-func (l *Logger) PrintSection(name string) {
-	header := fmt.Sprintf("\n--- %s ---\n", name)
+// format: "\n--- {label} ---\n"
+func (l *Logger) PrintSection(section status.Section) {
+	header := fmt.Sprintf("\n--- %s ---\n", section.Label)
 	l.writeFile("%s", header)
 	l.writeStdout("%s", l.colors.Warn().Sprint(header))
 }
@@ -301,7 +322,7 @@ func (l *Logger) PrintAligned(text string) {
 		return
 	}
 
-	phaseColor := l.colors.ForPhase(l.phase)
+	phaseColor := l.colors.ForPhase(l.holder.Get())
 
 	// wrap text to terminal width
 	width := getTerminalWidth()
@@ -419,12 +440,74 @@ func (l *Logger) Warn(format string, args ...any) {
 	l.writeStdout("%s %s\n", tsStr, warnStr)
 }
 
-// Elapsed returns formatted elapsed time since start.
-func (l *Logger) Elapsed() string {
-	return humanize.RelTime(l.startTime, time.Now(), "", "")
+// LogQuestion logs a question and its options for plan creation mode.
+// format: QUESTION: <question>\n OPTIONS: <opt1>, <opt2>, ...
+func (l *Logger) LogQuestion(question string, options []string) {
+	timestamp := time.Now().Format(timestampFormat)
+
+	l.writeFile("[%s] QUESTION: %s\n", timestamp, question)
+	l.writeFile("[%s] OPTIONS: %s\n", timestamp, strings.Join(options, ", "))
+
+	tsStr := l.colors.Timestamp().Sprintf("[%s]", timestamp)
+	questionStr := l.colors.Info().Sprintf("QUESTION: %s", question)
+	optionsStr := l.colors.Info().Sprintf("OPTIONS: %s", strings.Join(options, ", "))
+	l.writeStdout("%s %s\n", tsStr, questionStr)
+	l.writeStdout("%s %s\n", tsStr, optionsStr)
 }
 
-// Close writes footer and closes the progress file.
+// LogAnswer logs the user's answer for plan creation mode.
+// format: ANSWER: <answer>
+func (l *Logger) LogAnswer(answer string) {
+	timestamp := time.Now().Format(timestampFormat)
+
+	l.writeFile("[%s] ANSWER: %s\n", timestamp, answer)
+
+	tsStr := l.colors.Timestamp().Sprintf("[%s]", timestamp)
+	answerStr := l.colors.Info().Sprintf("ANSWER: %s", answer)
+	l.writeStdout("%s %s\n", tsStr, answerStr)
+}
+
+// LogDraftReview logs the user's draft review action and optional feedback.
+// format: DRAFT REVIEW: <action>
+// if feedback is non-empty: FEEDBACK: <feedback>
+func (l *Logger) LogDraftReview(action, feedback string) {
+	timestamp := time.Now().Format(timestampFormat)
+
+	l.writeFile("[%s] DRAFT REVIEW: %s\n", timestamp, action)
+
+	tsStr := l.colors.Timestamp().Sprintf("[%s]", timestamp)
+	actionStr := l.colors.Info().Sprintf("DRAFT REVIEW: %s", action)
+	l.writeStdout("%s %s\n", tsStr, actionStr)
+
+	if feedback != "" {
+		l.writeFile("[%s] FEEDBACK: %s\n", timestamp, feedback)
+		feedbackStr := l.colors.Info().Sprintf("FEEDBACK: %s", feedback)
+		l.writeStdout("%s %s\n", tsStr, feedbackStr)
+	}
+}
+
+// LogDiffStats writes git diff stats to the progress file (file-only, no stdout).
+// format: [timestamp] DIFFSTATS: files=F additions=A deletions=D
+func (l *Logger) LogDiffStats(files, additions, deletions int) {
+	if l.file == nil || files <= 0 {
+		return
+	}
+	timestamp := time.Now().Format(timestampFormat)
+	l.writeFile("[%s] DIFFSTATS: files=%d additions=%d deletions=%d\n",
+		timestamp, files, additions, deletions)
+}
+
+// Elapsed returns formatted elapsed time since start.
+// for durations >= 1 hour, truncates to minutes (e.g. "1h23m"); otherwise to seconds (e.g. "5m30s").
+func (l *Logger) Elapsed() string {
+	d := time.Since(l.startTime)
+	if d >= time.Hour {
+		return strings.TrimSuffix(d.Truncate(time.Minute).String(), "0s")
+	}
+	return d.Truncate(time.Second).String()
+}
+
+// Close writes footer, releases the file lock, and closes the progress file.
 func (l *Logger) Close() error {
 	if l.file == nil {
 		return nil
@@ -432,6 +515,10 @@ func (l *Logger) Close() error {
 
 	l.writeFile("\n%s\n", strings.Repeat("-", 60))
 	l.writeFile("Completed: %s (%s)\n", time.Now().Format("2006-01-02 15:04:05"), l.Elapsed())
+
+	// release file lock before closing
+	_ = unlockFile(l.file)
+	unregisterActiveLock(l.file.Name())
 
 	if err := l.file.Close(); err != nil {
 		return fmt.Errorf("close progress file: %w", err)
@@ -449,26 +536,74 @@ func (l *Logger) writeStdout(format string, args ...any) {
 	fmt.Fprintf(l.stdout, format, args...)
 }
 
-// getProgressFilename returns progress file path based on plan and mode.
-func progressFilename(planFile, mode string) string {
+// progressDir is the directory for progress files within the project.
+const progressDir = ".ralphex/progress"
+
+// progressFilename returns progress file path based on plan and mode.
+func progressFilename(planFile, planDescription, mode string) string {
+	// plan mode uses sanitized plan description
+	if mode == "plan" && planDescription != "" {
+		sanitized := sanitizePlanName(planDescription)
+		return filepath.Join(progressDir, fmt.Sprintf("progress-plan-%s.txt", sanitized))
+	}
+
 	if planFile != "" {
 		stem := strings.TrimSuffix(filepath.Base(planFile), ".md")
 		switch mode {
 		case "codex-only":
-			return fmt.Sprintf("progress-%s-codex.txt", stem)
+			return filepath.Join(progressDir, fmt.Sprintf("progress-%s-codex.txt", stem))
 		case "review":
-			return fmt.Sprintf("progress-%s-review.txt", stem)
+			return filepath.Join(progressDir, fmt.Sprintf("progress-%s-review.txt", stem))
 		default:
-			return fmt.Sprintf("progress-%s.txt", stem)
+			return filepath.Join(progressDir, fmt.Sprintf("progress-%s.txt", stem))
 		}
 	}
 
 	switch mode {
 	case "codex-only":
-		return "progress-codex.txt"
+		return filepath.Join(progressDir, "progress-codex.txt")
 	case "review":
-		return "progress-review.txt"
+		return filepath.Join(progressDir, "progress-review.txt")
+	case "plan":
+		return filepath.Join(progressDir, "progress-plan.txt")
 	default:
-		return "progress.txt"
+		return filepath.Join(progressDir, "progress.txt")
 	}
+}
+
+// sanitizePlanName converts plan description to a safe filename component.
+// replaces spaces with dashes, removes special characters, and limits length.
+func sanitizePlanName(desc string) string {
+	// lowercase and replace spaces with dashes
+	result := strings.ToLower(desc)
+	result = strings.ReplaceAll(result, " ", "-")
+
+	// keep only alphanumeric and dashes
+	var clean strings.Builder
+	for _, r := range result {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			clean.WriteRune(r)
+		}
+	}
+	result = clean.String()
+
+	// collapse multiple dashes
+	for strings.Contains(result, "--") {
+		result = strings.ReplaceAll(result, "--", "-")
+	}
+
+	// trim leading/trailing dashes
+	result = strings.Trim(result, "-")
+
+	// limit length to 50 characters
+	if len(result) > 50 {
+		result = result[:50]
+		// don't end with a dash
+		result = strings.TrimRight(result, "-")
+	}
+
+	if result == "" {
+		return "unnamed"
+	}
+	return result
 }

@@ -1,0 +1,24 @@
+name: e2e
+
+on:
+  workflow_dispatch:  # manual trigger only
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: set up go 1.26
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.26"
+        id: go
+
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: install playwright browsers
+        run: go run github.com/playwright-community/playwright-go/cmd/playwright@latest install --with-deps chromium
+
+      - name: run e2e tests
+        run: go test -tags=e2e -count=1 -v -timeout=300s ./e2e/...

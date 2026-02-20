@@ -4,6 +4,7 @@ import (
 	"embed"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,6 +27,10 @@ func TestPromptLoader_Load_FromUserDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_first_codex.txt"), []byte("custom first codex review"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_second_codex.txt"), []byte("custom second codex review"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "codex.txt"), []byte("custom codex prompt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte("custom make plan prompt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "finalize.txt"), []byte("custom finalize prompt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_review.txt"), []byte("custom review prompt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_eval.txt"), []byte("custom eval prompt"), 0o600))
 
 	loader := newPromptLoader(defaultsFS)
 	prompts, err := loader.Load("", globalDir)
@@ -37,6 +42,10 @@ func TestPromptLoader_Load_FromUserDir(t *testing.T) {
 	assert.Equal(t, "custom first codex review", prompts.ReviewFirstCodex)
 	assert.Equal(t, "custom second codex review", prompts.ReviewSecondCodex)
 	assert.Equal(t, "custom codex prompt", prompts.Codex)
+	assert.Equal(t, "custom make plan prompt", prompts.MakePlan)
+	assert.Equal(t, "custom finalize prompt", prompts.Finalize)
+	assert.Equal(t, "custom review prompt", prompts.CustomReview)
+	assert.Equal(t, "custom eval prompt", prompts.CustomEval)
 }
 
 func TestPromptLoader_Load_PartialUserFiles(t *testing.T) {
@@ -68,6 +77,8 @@ func TestPromptLoader_Load_NoUserDir(t *testing.T) {
 	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}")
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
 	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewSecondCodex, "{{GOAL}}")
+	assert.Contains(t, prompts.MakePlan, "{{PLAN_DESCRIPTION}}")
 }
 
 func TestPromptLoader_Load_EmptyUserFile(t *testing.T) {
@@ -259,16 +270,39 @@ func TestPromptLoader_loadPromptFile_WhitespaceHandling(t *testing.T) {
 	assert.Equal(t, "content with spaces", content)
 }
 
-func TestPromptLoader_loadPromptFile_StripsComments(t *testing.T) {
+func TestPromptLoader_loadPromptFile_PreservesMarkdownHeaders(t *testing.T) {
 	tmpDir := t.TempDir()
-	promptFile := filepath.Join(tmpDir, "test.txt")
-	content := "# this is a comment\nkeep this line\n  # indented comment\nalso keep this"
-	require.NoError(t, os.WriteFile(promptFile, []byte(content), 0o600))
-
 	pl := &promptLoader{embedFS: defaultsFS}
-	result, err := pl.loadPromptFile(promptFile)
-	require.NoError(t, err)
-	assert.Equal(t, "keep this line\nalso keep this", result)
+
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "single leading comment preserved", input: "# Title\n\nDo this task\n\n## Step 1\n\nFirst step",
+			expected: "# Title\n\nDo this task\n\n## Step 1\n\nFirst step"},
+		{name: "two leading comments stripped", input: "# comment\n# another\n\nDo this task\n\n## Step 1\n\nFirst step",
+			expected: "Do this task\n\n## Step 1\n\nFirst step"},
+		{name: "meta block stripped h1 in body preserved", input: "# comment 1\n# comment 2\n\n# Title\n\nContent",
+			expected: "# Title\n\nContent"},
+		{name: "meta block stripped template headers preserved", input: "# prompt docs\n# more docs\n\n<<<MARKER>>>\n# Plan Title\n## Overview\n<<<END>>>",
+			expected: "<<<MARKER>>>\n# Plan Title\n## Overview\n<<<END>>>"},
+		{name: "no comments just content", input: "Do the task\n\n## Section\n\nDetails",
+			expected: "Do the task\n\n## Section\n\nDetails"},
+		{name: "only comments returns empty", input: "# comment one\n# comment two", expected: ""},
+		{name: "multiple leading comments stripped", input: "# meta comment 1\n# meta comment 2\n# meta comment 3\n\nActual prompt content",
+			expected: "Actual prompt content"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			promptFile := filepath.Join(tmpDir, tc.name+".txt")
+			require.NoError(t, os.WriteFile(promptFile, []byte(tc.input), 0o600))
+			result, err := pl.loadPromptFile(promptFile)
+			require.NoError(t, err)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
 }
 
 func TestPromptLoader_loadPromptFromEmbedFS(t *testing.T) {
@@ -276,6 +310,34 @@ func TestPromptLoader_loadPromptFromEmbedFS(t *testing.T) {
 	content, err := pl.loadPromptFromEmbedFS("defaults/config")
 	require.NoError(t, err)
 	assert.Contains(t, content, "claude_command")
+}
+
+func TestPromptLoader_loadPromptFromEmbedFS_StripsLeadingCommentsPreservesBodyHeaders(t *testing.T) {
+	pl := &promptLoader{embedFS: defaultsFS}
+	content, err := pl.loadPromptFromEmbedFS("defaults/prompts/make_plan.txt")
+	require.NoError(t, err)
+	// leading meta-comments should be stripped
+	assert.False(t, strings.HasPrefix(content, "# plan creation prompt"), "leading meta-comment should be stripped")
+	assert.NotContains(t, content, "# available variables:")
+	// markdown headers in body should be preserved
+	assert.Contains(t, content, "## Step 1: Read Progress File")
+	assert.Contains(t, content, "## Step 2: Explore the Codebase")
+	assert.Contains(t, content, "# <Title>")
+	assert.Contains(t, content, "## Overview")
+}
+
+func TestPromptLoader_loadPromptFromEmbedFS_FinalizeStripsMetaComments(t *testing.T) {
+	pl := &promptLoader{embedFS: defaultsFS}
+	content, err := pl.loadPromptFromEmbedFS("defaults/prompts/finalize.txt")
+	require.NoError(t, err)
+	// leading meta-comments should be stripped
+	assert.False(t, strings.HasPrefix(content, "# finalize prompt"), "leading meta-comment should be stripped")
+	assert.NotContains(t, content, "# available variables:")
+	// actual content should start with the prompt body
+	assert.True(t, strings.HasPrefix(content, "Post-completion finalize step."), "should start with actual prompt content")
+	// body content preserved
+	assert.Contains(t, content, "{{DEFAULT_BRANCH}}")
+	assert.Contains(t, content, "Rebase your commits")
 }
 
 func TestPromptLoader_loadPromptFromEmbedFS_NotFound(t *testing.T) {
@@ -356,6 +418,61 @@ func Test_stripComments(t *testing.T) {
 	}
 }
 
+func Test_stripLeadingComments(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "no comments", input: "line one\nline two", expected: "line one\nline two"},
+		{name: "single comment preserved", input: "# Title\ncontent", expected: "# Title\ncontent"},
+		{name: "two comments stripped", input: "# comment\n# another\ncontent", expected: "content"},
+		{name: "two comments with blank line", input: "# comment\n# another\n\ncontent", expected: "content"},
+		{name: "mid-content comments kept", input: "# meta1\n# meta2\ncontent\n# mid comment\nmore", expected: "content\n# mid comment\nmore"},
+		{name: "meta block then hash title", input: "# comment\n# another\n\n# Title\n\nContent", expected: "# Title\n\nContent"},
+		{name: "only comments", input: "# comment\n# another", expected: ""},
+		{name: "two comments before frontmatter", input: "# desc\n# more\n---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+		{name: "single comment before frontmatter preserved", input: "# desc\n---\nmodel: haiku\n---\nbody", expected: "# desc\n---\nmodel: haiku\n---\nbody"},
+		{name: "no leading comments with frontmatter", input: "---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+		{name: "empty input", input: "", expected: ""},
+		{name: "three comments stripped", input: "# meta 1\n# meta 2\n# meta 3\n\ncontent", expected: "content"},
+		{name: "single comment only", input: "# Title", expected: "# Title"},
+		{name: "blank line between comments preserves all", input: "# comment\n\n# another\ncontent", expected: "# comment\n\n# another\ncontent"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := stripLeadingComments(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
+func Test_stripLeadingCommentLines(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{name: "no comments", input: "line one\nline two", expected: "line one\nline two"},
+		{name: "single comment stripped", input: "# desc\n---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+		{name: "two comments stripped", input: "# desc\n# more\n---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+		{name: "three comments stripped", input: "# a\n# b\n# c\ncontent", expected: "content"},
+		{name: "empty input", input: "", expected: ""},
+		{name: "only comments", input: "# one\n# two", expected: ""},
+		{name: "blank line stops stripping", input: "# comment\n\n# another\ncontent", expected: "# another\ncontent"},
+		{name: "whitespace line after comments trimmed", input: "# comment\n# more\n   \n---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+		{name: "no comments with frontmatter", input: "---\nmodel: haiku\n---\nbody", expected: "---\nmodel: haiku\n---\nbody"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := stripLeadingCommentLines(tc.input)
+			assert.Equal(t, tc.expected, result)
+		})
+	}
+}
+
 func TestPromptLoader_loadPromptFile_PermissionDenied(t *testing.T) {
 	tmpDir := t.TempDir()
 	promptFile := filepath.Join(tmpDir, "test.txt")
@@ -385,4 +502,286 @@ func TestPromptLoader_Load_PromptWithOnlyComments(t *testing.T) {
 
 	// file with only comments should fall back to embedded default
 	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}")
+}
+
+func TestPromptLoader_Load_MakePlanPrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	// test custom make_plan prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte("custom plan prompt with {{PLAN_DESCRIPTION}}"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom plan prompt with {{PLAN_DESCRIPTION}}", prompts.MakePlan)
+}
+
+func TestPromptLoader_Load_MakePlanPrompt_FallsBackToEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "nonexistent")
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	// should fall back to embedded make_plan prompt
+	assert.Contains(t, prompts.MakePlan, "{{PLAN_DESCRIPTION}}")
+	assert.Contains(t, prompts.MakePlan, "{{PROGRESS_FILE}}")
+	assert.Contains(t, prompts.MakePlan, "RALPHEX:QUESTION")
+	assert.Contains(t, prompts.MakePlan, "RALPHEX:PLAN_READY")
+}
+
+func TestPromptLoader_Load_MakePlanPrompt_LocalOverridesGlobal(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	// global make_plan prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte("global make plan"), 0o600))
+	// local make_plan prompt
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "make_plan.txt"), []byte("local make plan"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local make plan", prompts.MakePlan)
+}
+
+func TestPromptLoader_Load_AllCommentedPromptsFallbackToEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	// create all prompt files with only comments (simulates commented defaults)
+	commentedContent := "# this is the default template\n# uncomment and customize below\n# actual prompt content"
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "task.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_first.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_second.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "codex.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_review.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_eval.txt"), []byte(commentedContent), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	// all prompts should fall back to embedded defaults since files contain only comments
+	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}", "task prompt should fall back to embedded")
+	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}", "review_first prompt should fall back to embedded")
+	assert.Contains(t, prompts.ReviewSecond, "{{GOAL}}", "review_second prompt should fall back to embedded")
+	assert.Contains(t, prompts.Codex, "{{CODEX_OUTPUT}}", "codex prompt should fall back to embedded")
+	assert.Contains(t, prompts.MakePlan, "{{PLAN_DESCRIPTION}}", "make_plan prompt should fall back to embedded")
+	assert.Contains(t, prompts.CustomReview, "{{DIFF_INSTRUCTION}}", "custom_review prompt should fall back to embedded")
+	assert.Contains(t, prompts.CustomEval, "{{CUSTOM_OUTPUT}}", "custom_eval prompt should fall back to embedded")
+}
+
+func TestPromptLoader_Load_MixedCommentedAndCustomPrompts(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	commentedContent := "# default template - commented out\n# customize below"
+
+	// some prompts are all-commented (should fall back to embedded)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "task.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "codex.txt"), []byte(commentedContent), 0o600))
+
+	// some prompts have custom content (should use custom)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_first.txt"), []byte("custom review first prompt"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_second.txt"), []byte("# header comment\ncustom review second"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte("custom make plan"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	// all-commented prompts fall back to embedded
+	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}", "all-commented task should fall back")
+	assert.Contains(t, prompts.Codex, "{{CODEX_OUTPUT}}", "all-commented codex should fall back")
+
+	// custom prompts used as-is (single leading comment preserved, not a meta-block)
+	assert.Equal(t, "custom review first prompt", prompts.ReviewFirst)
+	assert.Equal(t, "# header comment\ncustom review second", prompts.ReviewSecond)
+	assert.Equal(t, "custom make plan", prompts.MakePlan)
+}
+
+func TestPromptLoader_Load_LocalAllCommentedFallsBackToGlobal(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	commentedContent := "# all commented\n# no actual content"
+
+	// local has all-commented file
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "task.txt"), []byte(commentedContent), 0o600))
+
+	// global has actual content
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "task.txt"), []byte("global task content"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	// local all-commented should fall through to global
+	assert.Equal(t, "global task content", prompts.Task)
+}
+
+func TestPromptLoader_Load_LocalAndGlobalAllCommentedFallsBackToEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	commentedContent := "# all commented\n# no actual content"
+
+	// both local and global have all-commented files
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "task.txt"), []byte(commentedContent), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "task.txt"), []byte(commentedContent), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	// both all-commented should fall back to embedded
+	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}", "should fall back to embedded when both local and global are all-commented")
+}
+
+func TestPromptLoader_Load_FinalizePrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	// test custom finalize prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "finalize.txt"), []byte("custom finalize with {{DEFAULT_BRANCH}}"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom finalize with {{DEFAULT_BRANCH}}", prompts.Finalize)
+}
+
+func TestPromptLoader_Load_FinalizePrompt_LocalOverridesGlobal(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	// global finalize prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "finalize.txt"), []byte("global finalize"), 0o600))
+	// local finalize prompt
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "finalize.txt"), []byte("local finalize"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local finalize", prompts.Finalize)
+}
+
+func TestPromptLoader_Load_CustomReviewPrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	// test custom custom_review prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_review.txt"), []byte("custom review with {{DIFF_INSTRUCTION}}"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom review with {{DIFF_INSTRUCTION}}", prompts.CustomReview)
+}
+
+func TestPromptLoader_Load_CustomReviewPrompt_FallsBackToEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "nonexistent")
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	// should fall back to embedded custom_review prompt
+	assert.Contains(t, prompts.CustomReview, "{{DIFF_INSTRUCTION}}")
+	assert.Contains(t, prompts.CustomReview, "{{GOAL}}")
+	assert.Contains(t, prompts.CustomReview, "NO ISSUES FOUND")
+}
+
+func TestPromptLoader_Load_CustomReviewPrompt_LocalOverridesGlobal(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	// global custom_review prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_review.txt"), []byte("global custom review"), 0o600))
+	// local custom_review prompt
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "custom_review.txt"), []byte("local custom review"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local custom review", prompts.CustomReview)
+}
+
+func TestPromptLoader_Load_CustomEvalPrompt(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+
+	// test custom custom_eval prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_eval.txt"), []byte("custom eval with {{CUSTOM_OUTPUT}}"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "custom eval with {{CUSTOM_OUTPUT}}", prompts.CustomEval)
+}
+
+func TestPromptLoader_Load_CustomEvalPrompt_FallsBackToEmbedded(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "nonexistent")
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load("", globalDir)
+	require.NoError(t, err)
+
+	// should fall back to embedded custom_eval prompt
+	assert.Contains(t, prompts.CustomEval, "{{CUSTOM_OUTPUT}}")
+	assert.Contains(t, prompts.CustomEval, "{{PLAN_FILE}}")
+	assert.Contains(t, prompts.CustomEval, "RALPHEX:CODEX_REVIEW_DONE")
+}
+
+func TestPromptLoader_Load_CustomEvalPrompt_LocalOverridesGlobal(t *testing.T) {
+	tmpDir := t.TempDir()
+	globalDir := filepath.Join(tmpDir, "global", "prompts")
+	localDir := filepath.Join(tmpDir, "local", "prompts")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	require.NoError(t, os.MkdirAll(localDir, 0o700))
+
+	// global custom_eval prompt
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "custom_eval.txt"), []byte("global custom eval"), 0o600))
+	// local custom_eval prompt
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "custom_eval.txt"), []byte("local custom eval"), 0o600))
+
+	loader := newPromptLoader(defaultsFS)
+	prompts, err := loader.Load(localDir, globalDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, "local custom eval", prompts.CustomEval)
 }

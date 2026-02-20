@@ -164,6 +164,25 @@ func TestCodexExecutor_Run_WaitError(t *testing.T) {
 	assert.Equal(t, "partial output", result.Output)
 }
 
+func TestCodexExecutor_Run_WaitErrorWithStderr(t *testing.T) {
+	// stderr content should appear in the error message when codex exits non-zero
+	mock := &mockCodexRunner{
+		runFunc: func(_ context.Context, _ string, _ ...string) (CodexStreams, func() error, error) {
+			stderr := "--------\nworkdir: /tmp/test\n--------\nError: authentication failed\nPlease check your API key"
+			return mockStreams(stderr, ""), mockWaitError(errors.New("exit status 1")), nil
+		},
+	}
+	e := &CodexExecutor{runner: mock}
+
+	result := e.Run(context.Background(), "analyze code")
+
+	require.Error(t, result.Error)
+	assert.Contains(t, result.Error.Error(), "codex exited with error")
+	assert.Contains(t, result.Error.Error(), "exit status 1")
+	assert.Contains(t, result.Error.Error(), "stderr:")
+	assert.Contains(t, result.Error.Error(), "authentication failed")
+}
+
 func TestCodexExecutor_Run_ContextCanceled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -181,6 +200,9 @@ func TestCodexExecutor_Run_ContextCanceled(t *testing.T) {
 }
 
 func TestCodexExecutor_Run_DefaultSettings(t *testing.T) {
+	// clear docker env to test default sandbox behavior
+	t.Setenv("RALPHEX_DOCKER", "")
+
 	var capturedArgs []string
 	mock := &mockCodexRunner{
 		runFunc: func(_ context.Context, name string, args ...string) (CodexStreams, func() error, error) {
@@ -196,13 +218,16 @@ func TestCodexExecutor_Run_DefaultSettings(t *testing.T) {
 
 	// verify default settings
 	argsStr := strings.Join(capturedArgs, " ")
-	assert.Contains(t, argsStr, `model="gpt-5.2-codex"`)
+	assert.Contains(t, argsStr, `model="gpt-5.3-codex"`)
 	assert.Contains(t, argsStr, "model_reasoning_effort=xhigh")
 	assert.Contains(t, argsStr, "stream_idle_timeout_ms=3600000")
 	assert.Contains(t, argsStr, "--sandbox read-only")
 }
 
 func TestCodexExecutor_Run_CustomSettings(t *testing.T) {
+	// clear docker env to test custom sandbox setting
+	t.Setenv("RALPHEX_DOCKER", "")
+
 	var capturedCmd string
 	var capturedArgs []string
 	mock := &mockCodexRunner{
@@ -422,11 +447,11 @@ func TestCodexExecutor_processStderr_contextCancellation(t *testing.T) {
 	}()
 
 	e := &CodexExecutor{}
-	err := e.processStderr(ctx, pr)
+	res := e.processStderr(ctx, pr)
 
 	// should return context.Canceled or nil (depending on timing)
-	if err != nil {
-		assert.ErrorIs(t, err, context.Canceled)
+	if res.err != nil {
+		assert.ErrorIs(t, res.err, context.Canceled)
 	}
 }
 
@@ -492,10 +517,38 @@ func TestCodexExecutor_processStderr_readError(t *testing.T) {
 	e := &CodexExecutor{}
 	errReader := &failingReader{err: errors.New("read failed")}
 
-	err := e.processStderr(context.Background(), errReader)
+	res := e.processStderr(context.Background(), errReader)
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "read stderr")
+	require.Error(t, res.err)
+	assert.Contains(t, res.err.Error(), "read stderr")
+}
+
+func TestCodexExecutor_processStderr_lastLines(t *testing.T) {
+	tests := []struct {
+		name      string
+		stderr    string
+		wantLines []string
+	}{
+		{"more than 5 lines keeps last 5", "line1\nline2\nline3\nline4\nline5\nline6\nline7\n",
+			[]string{"line3", "line4", "line5", "line6", "line7"}},
+		{"fewer than 5 lines keeps all", "line1\nline2\n", []string{"line1", "line2"}},
+		{"empty stderr", "", nil},
+		{"long lines truncated to 256 runes", strings.Repeat("x", 500) + "\n",
+			[]string{strings.Repeat("x", 256) + "..."}},
+		{"preserves leading whitespace", "  indented line\n\t\ttabbed line\n",
+			[]string{"  indented line", "\t\ttabbed line"}},
+		{"truncates by runes not bytes", strings.Repeat("ж", 300) + "\n",
+			[]string{strings.Repeat("ж", 256) + "..."}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &CodexExecutor{}
+			res := e.processStderr(context.Background(), strings.NewReader(tc.stderr))
+			require.NoError(t, res.err)
+			assert.Equal(t, tc.wantLines, res.lastLines)
+		})
+	}
 }
 
 func TestCodexExecutor_readStdout_error(t *testing.T) {
@@ -610,20 +663,22 @@ func TestCodexExecutor_shouldDisplay_deduplication(t *testing.T) {
 }
 
 func TestCodexExecutor_processStderr_largeLines(t *testing.T) {
-	// test that stderr lines larger than 64KB (default bufio.Scanner limit) are handled
-	// this was the "token too long" bug fix
+	// test that stderr lines of arbitrary length are handled without limit
 
 	tests := []struct {
 		name string
 		size int
 	}{
 		{"100KB line", 100 * 1024},
-		{"500KB line", 500 * 1024},
 		{"1MB line", 1024 * 1024},
+		{"65MB line (exceeds old scanner limit)", 65 * 1024 * 1024},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.size >= 65*1024*1024 && testing.Short() {
+				t.Skip("skipping 65MB allocation in short mode")
+			}
 			// create a large line in header block (which gets displayed)
 			largeContent := strings.Repeat("x", tc.size)
 			stderr := "--------\n" + largeContent + "\n--------\n"
@@ -635,9 +690,9 @@ func TestCodexExecutor_processStderr_largeLines(t *testing.T) {
 				},
 			}
 
-			err := e.processStderr(context.Background(), strings.NewReader(stderr))
+			res := e.processStderr(context.Background(), strings.NewReader(stderr))
 
-			require.NoError(t, err, "should handle %d byte line without error", tc.size)
+			require.NoError(t, res.err, "should handle %d byte line without error", tc.size)
 			assert.Contains(t, shown, largeContent, "large content should be captured")
 		})
 	}
@@ -674,4 +729,113 @@ func TestCodexExecutor_Run_largeOutput(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "large stderr content should be captured")
+}
+
+func TestCodexExecutor_Run_ErrorPattern(t *testing.T) {
+	tests := []struct {
+		name        string
+		stdout      string
+		patterns    []string
+		wantError   bool
+		wantPattern string
+		wantHelpCmd string
+		wantOutput  string
+	}{
+		{
+			name:       "no patterns configured",
+			stdout:     "Rate limit exceeded",
+			patterns:   nil,
+			wantError:  false,
+			wantOutput: "Rate limit exceeded",
+		},
+		{
+			name:       "pattern not matched",
+			stdout:     "Analysis complete: no issues found",
+			patterns:   []string{"rate limit", "quota exceeded"},
+			wantError:  false,
+			wantOutput: "Analysis complete: no issues found",
+		},
+		{
+			name:        "pattern matched",
+			stdout:      "Error: Rate limit exceeded, please try again later",
+			patterns:    []string{"rate limit"},
+			wantError:   true,
+			wantPattern: "rate limit",
+			wantHelpCmd: "codex /status",
+			wantOutput:  "Error: Rate limit exceeded, please try again later",
+		},
+		{
+			name:        "case insensitive match",
+			stdout:      "QUOTA EXCEEDED for your account",
+			patterns:    []string{"quota exceeded"},
+			wantError:   true,
+			wantPattern: "quota exceeded",
+			wantHelpCmd: "codex /status",
+			wantOutput:  "QUOTA EXCEEDED for your account",
+		},
+		{
+			name:        "first matching pattern returned",
+			stdout:      "rate limit and quota exceeded",
+			patterns:    []string{"rate limit", "quota exceeded"},
+			wantError:   true,
+			wantPattern: "rate limit",
+			wantHelpCmd: "codex /status",
+			wantOutput:  "rate limit and quota exceeded",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &mockCodexRunner{
+				runFunc: func(_ context.Context, _ string, _ ...string) (CodexStreams, func() error, error) {
+					return mockStreams("", tc.stdout), mockWait(), nil
+				},
+			}
+			e := &CodexExecutor{
+				runner:        mock,
+				ErrorPatterns: tc.patterns,
+			}
+
+			result := e.Run(context.Background(), "analyze code")
+
+			assert.Equal(t, tc.wantOutput, result.Output)
+
+			if tc.wantError {
+				require.Error(t, result.Error)
+				var patternErr *PatternMatchError
+				require.ErrorAs(t, result.Error, &patternErr)
+				assert.Equal(t, tc.wantPattern, patternErr.Pattern)
+				assert.Equal(t, tc.wantHelpCmd, patternErr.HelpCmd)
+			} else {
+				require.NoError(t, result.Error)
+			}
+		})
+	}
+}
+
+func TestCodexExecutor_Run_ErrorPattern_WithSignal(t *testing.T) {
+	// error pattern should still be detected even when output contains a signal
+	mock := &mockCodexRunner{
+		runFunc: func(_ context.Context, _ string, _ ...string) (CodexStreams, func() error, error) {
+			stdout := "Rate limit exceeded <<<RALPHEX:CODEX_REVIEW_DONE>>>"
+			return mockStreams("", stdout), mockWait(), nil
+		},
+	}
+	e := &CodexExecutor{
+		runner:        mock,
+		ErrorPatterns: []string{"rate limit"},
+	}
+
+	result := e.Run(context.Background(), "analyze code")
+
+	// should have error due to pattern match
+	require.Error(t, result.Error)
+	var patternErr *PatternMatchError
+	require.ErrorAs(t, result.Error, &patternErr)
+	assert.Equal(t, "rate limit", patternErr.Pattern)
+	assert.Equal(t, "codex /status", patternErr.HelpCmd)
+
+	// should preserve output and signal
+	assert.Contains(t, result.Output, "Rate limit exceeded")
+	assert.Equal(t, "<<<RALPHEX:CODEX_REVIEW_DONE>>>", result.Signal)
 }
