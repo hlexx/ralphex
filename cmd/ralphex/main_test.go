@@ -55,6 +55,23 @@ func skipIfClaudeNotAvailable(t *testing.T) {
 	}
 }
 
+// skipIfCodexNotAvailable loads config (read-only) and skips test if configured codex command is not in PATH.
+// uses LoadReadOnly to avoid installing defaults to real user config directory during tests.
+func skipIfCodexNotAvailable(t *testing.T) {
+	t.Helper()
+	cfg, err := config.LoadReadOnly("")
+	if err != nil {
+		t.Skipf("failed to load config: %v", err)
+	}
+	codexCmd := cfg.CodexCommand
+	if codexCmd == "" {
+		codexCmd = "codex"
+	}
+	if _, err := exec.LookPath(codexCmd); err != nil {
+		t.Skipf("%s not installed", codexCmd)
+	}
+}
+
 func TestPromptPlanDescription(t *testing.T) {
 	colors := testColors()
 
@@ -183,8 +200,8 @@ func TestPlanFlagConflict(t *testing.T) {
 
 func TestPlanModeIntegration(t *testing.T) {
 	t.Run("plan_mode_requires_git_repo", func(t *testing.T) {
-		// skip if configured claude command is not installed
-		skipIfClaudeNotAvailable(t)
+		// skip if configured codex command is not installed
+		skipIfCodexNotAvailable(t)
 
 		// run from a non-git directory
 		tmpDir := t.TempDir()
@@ -223,8 +240,8 @@ func TestPlanModeIntegration(t *testing.T) {
 	})
 
 	t.Run("plan_mode_progress_file_naming", func(t *testing.T) {
-		// skip if configured claude command is not installed
-		skipIfClaudeNotAvailable(t)
+		// skip if configured codex command is not installed
+		skipIfCodexNotAvailable(t)
 
 		// test that progress filename is generated correctly for plan mode
 		// the actual file creation is tested by the integration test with real runner
@@ -541,6 +558,36 @@ func TestResolveAppConfig(t *testing.T) {
 		assert.Equal(t, "high", resolved.CodexReasoningEffort)
 		assert.Equal(t, "gpt-5.3-codex", base.CodexModel)
 		assert.Equal(t, "xhigh", base.CodexReasoningEffort)
+	})
+}
+
+func TestResolvePlanAppConfig(t *testing.T) {
+	t.Run("forces_codex_model_and_reasoning", func(t *testing.T) {
+		base := &config.Config{
+			CodexModel:           "custom-model",
+			CodexReasoningEffort: "low",
+			CodexSandbox:         "danger-full-access",
+		}
+
+		resolved := resolvePlanAppConfig(base)
+		require.NotNil(t, resolved)
+		assert.Equal(t, "gpt-5.3-codex", resolved.CodexModel)
+		assert.Equal(t, "xhigh", resolved.CodexReasoningEffort)
+		assert.Equal(t, "danger-full-access", resolved.CodexSandbox)
+	})
+
+	t.Run("upgrades_read_only_or_empty_sandbox_to_workspace_write", func(t *testing.T) {
+		readOnly := resolvePlanAppConfig(&config.Config{CodexSandbox: "read-only"})
+		require.NotNil(t, readOnly)
+		assert.Equal(t, "workspace-write", readOnly.CodexSandbox)
+
+		empty := resolvePlanAppConfig(&config.Config{})
+		require.NotNil(t, empty)
+		assert.Equal(t, "workspace-write", empty.CodexSandbox)
+	})
+
+	t.Run("returns_nil_for_nil_input", func(t *testing.T) {
+		assert.Nil(t, resolvePlanAppConfig(nil))
 	})
 }
 

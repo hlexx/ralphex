@@ -612,6 +612,26 @@ func resolveAppConfig(cfg *config.Config, o opts) *config.Config {
 	return &cloned
 }
 
+// resolvePlanAppConfig prepares app config specifically for plan mode.
+// plan mode always runs with codex planner using gpt-5.3-codex + xhigh.
+func resolvePlanAppConfig(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+
+	cloned := *cfg
+	cloned.CodexModel = "gpt-5.3-codex"
+	cloned.CodexReasoningEffort = "xhigh"
+
+	// plan creation needs write access for creating/updating plan files.
+	switch cloned.CodexSandbox {
+	case "", "read-only":
+		cloned.CodexSandbox = "workspace-write"
+	}
+
+	return &cloned
+}
+
 func printStartupInfo(info startupInfo, colors *progress.Colors) {
 	if info.Mode == processor.ModePlan {
 		colors.Info().Printf("starting interactive plan creation\n")
@@ -678,17 +698,25 @@ func runPlanMode(ctx context.Context, o opts, req executePlanRequest) error {
 	// record start time for finding the created plan
 	startTime := time.Now()
 
+	// plan mode uses codex planner.
+	planCfg := resolvePlanAppConfig(req.Config)
+	if err := checkCodexDep(planCfg); err != nil {
+		return fmt.Errorf("plan mode requires codex: %w", err)
+	}
+
 	// create and configure runner
 	r := processor.New(processor.Config{
-		PlanDescription:  o.PlanDescription,
-		ProgressPath:     baseLog.Path(),
-		Mode:             processor.ModePlan,
-		MaxIterations:    o.MaxIterations,
-		Debug:            o.Debug,
-		NoColor:          o.NoColor,
-		IterationDelayMs: req.Config.IterationDelayMs,
-		DefaultBranch:    req.DefaultBranch,
-		AppConfig:        req.Config,
+		PlanDescription:    o.PlanDescription,
+		ProgressPath:       baseLog.Path(),
+		Mode:               processor.ModePlan,
+		MaxIterations:      o.MaxIterations,
+		Debug:              o.Debug,
+		NoColor:            o.NoColor,
+		IterationDelayMs:   planCfg.IterationDelayMs,
+		CodexEnabled:       true,
+		UseCodexForPrimary: true,
+		DefaultBranch:      req.DefaultBranch,
+		AppConfig:          planCfg,
 	}, baseLog, holder)
 	r.SetInputCollector(collector)
 
