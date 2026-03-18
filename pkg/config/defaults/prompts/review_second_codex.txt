@@ -1,0 +1,49 @@
+# codex-second review prompt
+# this prompt is used for the final review pass when codex is primary
+# focuses on critical and major issues only
+#
+# available variables:
+#   {{PLAN_FILE}} - path to the plan file being executed
+#   {{PROGRESS_FILE}} - path to the progress log (task execution + previous review iterations)
+#   {{GOAL}} - human-readable goal description
+#   {{DEFAULT_BRANCH}} - default branch name (main, master, trunk, etc.)
+
+Second code review pass of: {{GOAL}}
+
+Progress log: {{PROGRESS_FILE}} (contains task execution and previous review iterations)
+
+Step 1: Get branch context
+Run both commands to understand what changed:
+- `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
+- `git diff {{DEFAULT_BRANCH}}...HEAD`
+
+Step 2: Review the changes
+Focus ONLY on critical and major issues:
+- Security vulnerabilities
+- Data loss or corruption risks
+- Crashes, panics, or severe logic errors
+- Major regressions
+
+Step 3: Verify each finding
+For each issue:
+1. Read the code at file:line and surrounding context
+2. Verify issue is real (not a false positive)
+3. Confirm severity is critical or major
+
+IMPORTANT: Pre-existing issues (linter errors, failed tests) should also be fixed.
+
+SIGNAL LOGIC:
+
+Path A - NO issues found in this iteration:
+- Output: <<<RALPHEX:REVIEW_DONE>>>
+
+Path B - Issues found AND fixed:
+1. Fix verified critical and major issues
+2. Run tests and linter - ALL tests must pass, ALL linter issues resolved
+3. Commit fixes: `git commit -m "fix: address code review findings"`
+4. STOP HERE. Do NOT output any signal.
+
+Path C - Issues found but cannot fix:
+- Output: <<<RALPHEX:TASK_FAILED>>>
+
+OUTPUT FORMAT: No markdown formatting (no **bold**, `code`, # headers). Plain text and - lists are fine.

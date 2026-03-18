@@ -37,6 +37,9 @@ type opts struct {
 	Review                bool          `short:"r" long:"review" description:"skip task execution, run full review pipeline"`
 	ExternalOnly          bool          `short:"e" long:"external-only" description:"skip tasks and first review, run only external review loop"`
 	CodexOnly             bool          `short:"c" long:"codex-only" description:"alias for --external-only (deprecated)"`
+	CodexPrimary          bool          `long:"codex-primary" description:"use codex for task and review phases instead of claude"`
+	CodexModel            string        `long:"codex-model" description:"override codex model for this run"`
+	CodexThinking         string        `long:"codex-thinking" description:"override codex reasoning effort (low, medium, high, xhigh) for this run"`
 	TasksOnly             bool          `short:"t" long:"tasks-only" description:"run only task phase, skip all reviews"`
 	BaseRef               string        `short:"b" long:"base-ref" description:"override default branch for review diffs (branch name or commit hash)"`
 	Wait                  time.Duration `long:"wait" description:"wait duration on rate limit before retry (e.g. 1h, 30m)"`
@@ -209,6 +212,10 @@ func run(ctx context.Context, o opts) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
+	if err = normalizeCodexOverrides(&o); err != nil {
+		return err
+	}
+
 	// create colors from config (all colors guaranteed populated via fallback)
 	colors := progress.NewColors(cfg.Colors)
 
@@ -224,9 +231,11 @@ func run(ctx context.Context, o opts) error {
 		return runWatchOnly(ctx, o, cfg, colors)
 	}
 
-	// check dependencies using configured command (or default "claude")
-	if depErr := checkClaudeDep(cfg); depErr != nil {
-		return depErr
+	applyCLIOverrides(o, cfg)
+	mode := determineMode(o)
+
+	if err = validatePrimaryExecutor(mode, o, cfg); err != nil {
+		return err
 	}
 
 	// require running from repo root.
@@ -254,9 +263,6 @@ func run(ctx context.Context, o opts) error {
 	defaultBranch := resolveDefaultBranch("", cfg.DefaultBranch, autoDetected)
 	// baseRef is for review diffs and {{DEFAULT_BRANCH}} template variable (--base-ref override)
 	baseRef := resolveDefaultBranch(o.BaseRef, cfg.DefaultBranch, autoDetected)
-	applyCLIOverrides(o, cfg)
-
-	mode := determineMode(o)
 
 	// create plan selector for use by plan selection and plan mode
 	selector := plan.NewSelector(cfg.PlansDir, colors)
@@ -732,6 +738,18 @@ func checkClaudeDep(cfg *config.Config) error {
 	return nil
 }
 
+// checkCodexDep checks that the codex command is available in PATH.
+func checkCodexDep(cfg *config.Config) error {
+	codexCmd := cfg.CodexCommand
+	if codexCmd == "" {
+		codexCmd = "codex"
+	}
+	if _, err := exec.LookPath(codexCmd); err != nil {
+		return fmt.Errorf("%s not found in PATH", codexCmd)
+	}
+	return nil
+}
+
 // isWatchOnlyMode returns true if running in watch-only mode.
 // watch-only mode runs the web dashboard without executing any plan.
 func isWatchOnlyMode(o opts, configWatchDirs []string) bool {
@@ -788,21 +806,42 @@ func validateFlags(o opts) error {
 	return nil
 }
 
+// validatePrimaryExecutor checks runtime dependencies for the selected execution mode.
+func validatePrimaryExecutor(mode processor.Mode, o opts, cfg *config.Config) error {
+	if mode == processor.ModePlan {
+		return checkCodexDep(resolvePlanAppConfig(cfg, o))
+	}
+	if o.CodexPrimary {
+		if err := checkCodexDep(cfg); err != nil {
+			return err
+		}
+		switch cfg.CodexSandbox {
+		case "workspace-write", "danger-full-access":
+			return nil
+		default:
+			return errors.New("codex-primary requires codex_sandbox=workspace-write or danger-full-access")
+		}
+	}
+	return checkClaudeDep(cfg)
+}
+
 // createRunner creates a processor.Runner with the given configuration.
 func createRunner(req executePlanRequest, o opts, log processor.Logger, holder *status.PhaseHolder) *processor.Runner {
-	// --codex-only mode forces codex enabled regardless of config
-	codexEnabled := req.Config.CodexEnabled
-	if req.Mode == processor.ModeCodexOnly {
+	appCfg := resolveAppConfig(req.Config, o)
+
+	// --codex-only and --codex-primary force codex enabled regardless of config
+	codexEnabled := appCfg.CodexEnabled
+	if req.Mode == processor.ModeCodexOnly || o.CodexPrimary {
 		codexEnabled = true
 	}
 	// resolve max external iterations: CLI flag > config file > 0 (auto)
-	maxExtIter := req.Config.MaxExternalIterations
+	maxExtIter := appCfg.MaxExternalIterations
 	if o.MaxExternalIterations > 0 {
 		maxExtIter = o.MaxExternalIterations
 	}
 
 	// resolve review patience: CLI flag > config file > 0 (disabled)
-	reviewPatience := req.Config.ReviewPatience
+	reviewPatience := appCfg.ReviewPatience
 	if o.ReviewPatience > 0 {
 		reviewPatience = o.ReviewPatience
 	}
@@ -816,12 +855,15 @@ func createRunner(req executePlanRequest, o opts, log processor.Logger, holder *
 		ReviewPatience:        reviewPatience,
 		Debug:                 o.Debug,
 		NoColor:               o.NoColor,
-		IterationDelayMs:      req.Config.IterationDelayMs,
-		TaskRetryCount:        req.Config.TaskRetryCount,
+		IterationDelayMs:      appCfg.IterationDelayMs,
+		TaskRetryCount:        appCfg.TaskRetryCount,
 		CodexEnabled:          codexEnabled,
-		FinalizeEnabled:       req.Config.FinalizeEnabled,
+		UseCodexForPrimary:    o.CodexPrimary,
+		PrimaryCodexReasoning: resolvePrimaryCodexReasoning(req.Mode, appCfg, o),
+		ReviewCodexReasoning:  resolveReviewCodexReasoning(o),
+		FinalizeEnabled:       appCfg.FinalizeEnabled,
 		DefaultBranch:         req.BaseRef,
-		AppConfig:             req.Config,
+		AppConfig:             appCfg,
 	}, log, holder)
 	if req.GitSvc != nil {
 		r.SetGitChecker(req.GitSvc)
@@ -897,17 +939,23 @@ func runPlanMode(ctx context.Context, o opts, req executePlanRequest, selector *
 	// record start time for finding the created plan
 	startTime := time.Now()
 
+	planCfg := resolvePlanAppConfig(req.Config, o)
+
 	// create and configure runner
 	r := processor.New(processor.Config{
-		PlanDescription:  o.PlanDescription,
-		ProgressPath:     baseLog.Path(),
-		Mode:             processor.ModePlan,
-		MaxIterations:    maxIter,
-		Debug:            o.Debug,
-		NoColor:          o.NoColor,
-		IterationDelayMs: req.Config.IterationDelayMs,
-		DefaultBranch:    req.BaseRef,
-		AppConfig:        req.Config,
+		PlanDescription:       o.PlanDescription,
+		ProgressPath:          baseLog.Path(),
+		Mode:                  processor.ModePlan,
+		MaxIterations:         maxIter,
+		Debug:                 o.Debug,
+		NoColor:               o.NoColor,
+		IterationDelayMs:      planCfg.IterationDelayMs,
+		CodexEnabled:          true,
+		UseCodexForPrimary:    true,
+		PrimaryCodexReasoning: resolvePrimaryCodexReasoning(processor.ModePlan, planCfg, o),
+		ReviewCodexReasoning:  resolveReviewCodexReasoning(o),
+		DefaultBranch:         req.BaseRef,
+		AppConfig:             planCfg,
 	}, baseLog, holder)
 	r.SetInputCollector(collector)
 
@@ -1040,9 +1088,12 @@ func isResetOnly(o opts) bool {
 		!o.Review &&
 		!o.ExternalOnly &&
 		!o.CodexOnly &&
+		!o.CodexPrimary &&
 		!o.TasksOnly &&
 		!o.Serve &&
 		o.PlanDescription == "" &&
+		o.CodexModel == "" &&
+		o.CodexThinking == "" &&
 		len(o.Watch) == 0 &&
 		o.DumpDefaults == ""
 }
@@ -1088,6 +1139,68 @@ func applyCLIOverrides(o opts, cfg *config.Config) {
 		cfg.SessionTimeout = o.SessionTimeout
 		cfg.SessionTimeoutSet = true
 	}
+}
+
+func normalizeCodexOverrides(o *opts) error {
+	o.CodexModel = strings.TrimSpace(o.CodexModel)
+	if o.CodexThinking == "" {
+		return nil
+	}
+
+	o.CodexThinking = strings.ToLower(strings.TrimSpace(o.CodexThinking))
+	switch o.CodexThinking {
+	case "low", "medium", "high", "xhigh":
+		return nil
+	default:
+		return fmt.Errorf("invalid --codex-thinking %q, allowed values: low, medium, high, xhigh", o.CodexThinking)
+	}
+}
+
+func resolveAppConfig(cfg *config.Config, o opts) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	if o.CodexModel == "" {
+		return cfg
+	}
+
+	cloned := *cfg
+	cloned.CodexModel = o.CodexModel
+	return &cloned
+}
+
+func resolvePlanAppConfig(cfg *config.Config, o opts) *config.Config {
+	cloned := resolveAppConfig(cfg, o)
+	if cloned == nil {
+		return nil
+	}
+
+	planCfg := *cloned
+	switch planCfg.CodexSandbox {
+	case "", "read-only":
+		planCfg.CodexSandbox = "workspace-write"
+	}
+	return &planCfg
+}
+
+func resolvePrimaryCodexReasoning(mode processor.Mode, cfg *config.Config, o opts) string {
+	if o.CodexThinking != "" {
+		return o.CodexThinking
+	}
+	if mode == processor.ModePlan {
+		return "xhigh"
+	}
+	if cfg != nil && cfg.CodexReasoningEffort != "" {
+		return cfg.CodexReasoningEffort
+	}
+	return "medium"
+}
+
+func resolveReviewCodexReasoning(o opts) string {
+	if o.CodexThinking != "" {
+		return o.CodexThinking
+	}
+	return "xhigh"
 }
 
 // resolveMaxIterations returns the effective max iterations value.

@@ -1,0 +1,57 @@
+# codex-first review prompt
+# this prompt is used for the first (comprehensive) review pass when codex is primary
+#
+# available variables:
+#   {{PLAN_FILE}} - path to the plan file being executed
+#   {{PROGRESS_FILE}} - path to the progress log (task execution + previous review iterations)
+#   {{GOAL}} - human-readable goal description
+#   {{DEFAULT_BRANCH}} - default branch name (main, master, trunk, etc.)
+
+Code review of: {{GOAL}}
+
+Progress log: {{PROGRESS_FILE}} (contains task execution and previous review iterations)
+
+Step 1: Get branch context
+Run both commands to understand what changed:
+- `git log {{DEFAULT_BRANCH}}..HEAD --oneline`
+- `git diff {{DEFAULT_BRANCH}}...HEAD`
+
+Step 2: Review the changes
+Analyze for:
+- Bugs and logic errors
+- Security vulnerabilities
+- Race conditions
+- Error handling gaps
+- Test coverage issues
+- Over-engineering and simplification opportunities
+- Documentation gaps
+
+Step 3: Verify every finding
+For each issue:
+1. Read the code at file:line and surrounding context
+2. Verify the issue is real, not a false positive
+3. Check for existing mitigations
+
+Classify as:
+- CONFIRMED: fix it
+- FALSE POSITIVE: explain and ignore
+
+IMPORTANT: Pre-existing issues (linter errors, failed tests) should also be fixed.
+
+Step 4: Fix confirmed issues
+1. Fix all confirmed issues
+2. Run tests and linter - ALL tests must pass, ALL linter issues resolved
+3. Commit fixes: `git commit -m "fix: address code review findings"`
+
+SIGNAL LOGIC:
+
+Path A - NO confirmed issues found:
+- Output: <<<RALPHEX:REVIEW_DONE>>>
+
+Path B - Issues found AND fixed:
+- STOP HERE. Do NOT output any signal.
+
+Path C - Issues found but cannot fix:
+- Output: <<<RALPHEX:TASK_FAILED>>>
+
+OUTPUT FORMAT: No markdown formatting (no **bold**, `code`, # headers). Plain text and - lists are fine.

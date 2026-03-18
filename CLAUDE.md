@@ -67,6 +67,9 @@ docs/plans/         # plan files location
 - Progress file locking (flock) for active session detection
 - Progress file fresh start: completed files (with `Completed:` footer) are truncated on reuse instead of appending
 - Multiple execution modes: full, tasks-only, review-only, external-only/codex-only, plan creation
+- `--codex-primary` switches the primary executor from Claude to Codex while preserving the upstream review pipeline shape
+- `--codex-model` overrides the configured Codex model for a single run
+- `--codex-thinking` overrides Codex reasoning effort for a single run; planner and Codex review phases default to `xhigh`, task execution defaults to `medium`
 - `--base-ref` flag overrides default branch for review diffs (branch name or commit hash)
 - `--skip-finalize` flag disables finalize step for a single run
 - `--wait` flag enables rate limit retry with specified duration (e.g., `--wait 1h`)
@@ -115,9 +118,14 @@ Allows using custom scripts instead of codex for external code review:
 - `session_timeout` config / `--session-timeout` CLI flag sets per-session timeout for claude (e.g., `30m`, `1h`). When a claude session exceeds the timeout, it is killed and the phase loop continues to the next iteration. Applied in `runWithLimitRetry` via `context.WithTimeout`. Claude-only; codex and custom executors are not affected. Disabled by default (empty/0)
 - Manual break: pressing Ctrl+\ (SIGQUIT) during external review terminates the loop immediately via context cancellation. Break channel injected from `cmd/ralphex/` into Runner via `SetBreakCh()`. Not available on Windows
 - `codex_enabled = false` backward compat: treated as `external_review_tool = none`
+- `--codex-primary` promotes Codex from reviewer to primary executor for tasks and the first review pass; second review remains Codex-based as in the upstream external review flow
+- `--codex-primary` requires writable Codex sandbox (`workspace-write` or `danger-full-access`)
+- Codex-specific review prompts: `review_first_codex.txt` and `review_second_codex.txt` are used when `--codex-primary` is active, leaving the upstream Claude review prompts unchanged for default mode
 
 Key files:
 - `pkg/executor/custom.go` - CustomExecutor for running external scripts
+- `pkg/config/defaults/prompts/review_first_codex.txt` - first review prompt for codex-primary mode
+- `pkg/config/defaults/prompts/review_second_codex.txt` - second review prompt for codex-primary mode
 - `pkg/config/defaults/prompts/codex_review.txt` - prompt sent to codex external review tool
 - `pkg/config/defaults/prompts/custom_review.txt` - prompt sent to custom tool
 - `pkg/config/defaults/prompts/custom_eval.txt` - prompt for claude to evaluate custom tool output
@@ -258,6 +266,8 @@ GOOS=windows GOARCH=amd64 go build ./...
 - Precedence: CLI flags > local config > global config > embedded defaults
 - Custom prompts: `~/.config/ralphex/prompts/*.txt` or `.ralphex/prompts/*.txt`
 - Custom agents: `~/.config/ralphex/agents/*.txt` or `.ralphex/agents/*.txt`
+- Default Codex model: `gpt-5.4`
+- Default Codex reasoning: `medium` for primary task execution, `xhigh` for planning and Codex review phases
 - `default_branch` config option: override auto-detected default branch for review diffs
 - `max_iterations` config option: override CLI default (50) for maximum task iterations per plan (CLI flag `--max-iterations` takes precedence)
 - `vcs_command` config option: override the VCS binary used by the git backend (default: `"git"`). Set to a translation script path (e.g., `scripts/hg2git/hg2git.sh`) to use ralphex with Mercurial repos. See `docs/hg-support.md`

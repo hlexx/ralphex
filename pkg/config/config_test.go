@@ -32,6 +32,8 @@ func Test_defaultsFS_PromptFiles(t *testing.T) {
 		{file: "defaults/prompts/task.txt", contains: []string{"{{PLAN_FILE}}", "{{PROGRESS_FILE}}", "RALPHEX:ALL_TASKS_DONE", "RALPHEX:TASK_FAILED", "Success criteria", "Task sections", "### Task N:", "mark them [x]", "do not loop indefinitely"}},
 		{file: "defaults/prompts/review_first.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:testing}}"}},
 		{file: "defaults/prompts/review_second.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "{{agent:quality}}", "{{agent:implementation}}"}},
+		{file: "defaults/prompts/review_first_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "git diff {{DEFAULT_BRANCH}}...HEAD"}},
+		{file: "defaults/prompts/review_second_codex.txt", contains: []string{"{{GOAL}}", "{{PROGRESS_FILE}}", "RALPHEX:REVIEW_DONE", "git diff {{DEFAULT_BRANCH}}...HEAD"}},
 		{file: "defaults/prompts/codex.txt", contains: []string{"{{CODEX_OUTPUT}}", "RALPHEX:CODEX_REVIEW_DONE", "Codex reviewed"}},
 		{file: "defaults/prompts/codex_review.txt", contains: []string{"{{DIFF_INSTRUCTION}}", "{{PROGRESS_FILE}}", "{{PREVIOUS_REVIEW_CONTEXT}}", "{{PLAN_FILE}}"}},
 	}
@@ -56,6 +58,8 @@ func Test_defaultsFS_AllFilesPresent(t *testing.T) {
 		"defaults/prompts/task.txt",
 		"defaults/prompts/review_first.txt",
 		"defaults/prompts/review_second.txt",
+		"defaults/prompts/review_first_codex.txt",
+		"defaults/prompts/review_second_codex.txt",
 		"defaults/prompts/codex.txt",
 		"defaults/prompts/codex_review.txt",
 	}
@@ -199,7 +203,7 @@ func TestLoad_PartialConfig(t *testing.T) {
 	assert.Equal(t, "--dangerously-skip-permissions --output-format stream-json --verbose", cfg.ClaudeArgs)
 	assert.Equal(t, "codex", cfg.CodexCommand)
 	assert.Equal(t, "gpt-5.4", cfg.CodexModel)
-	assert.Equal(t, "xhigh", cfg.CodexReasoningEffort)
+	assert.Equal(t, "medium", cfg.CodexReasoningEffort)
 	assert.Equal(t, "read-only", cfg.CodexSandbox)
 	assert.Equal(t, 2000, cfg.IterationDelayMs)
 	assert.Equal(t, 3600000, cfg.CodexTimeoutMs)
@@ -225,7 +229,7 @@ func TestLoad_EmptyConfig(t *testing.T) {
 	assert.Equal(t, "--dangerously-skip-permissions --output-format stream-json --verbose", cfg.ClaudeArgs)
 	assert.Equal(t, "codex", cfg.CodexCommand)
 	assert.Equal(t, "gpt-5.4", cfg.CodexModel)
-	assert.Equal(t, "xhigh", cfg.CodexReasoningEffort)
+	assert.Equal(t, "medium", cfg.CodexReasoningEffort)
 	assert.Equal(t, "read-only", cfg.CodexSandbox)
 	assert.Equal(t, "docs/plans", cfg.PlansDir)
 	assert.Equal(t, 2000, cfg.IterationDelayMs)

@@ -56,6 +56,22 @@ func skipIfClaudeNotAvailable(t *testing.T) {
 	}
 }
 
+// skipIfCodexNotAvailable loads config (read-only) and skips test if configured codex command is not in PATH.
+func skipIfCodexNotAvailable(t *testing.T) {
+	t.Helper()
+	cfg, err := config.LoadReadOnly("")
+	if err != nil {
+		t.Skipf("failed to load config: %v", err)
+	}
+	codexCmd := cfg.CodexCommand
+	if codexCmd == "" {
+		codexCmd = "codex"
+	}
+	if _, err := exec.LookPath(codexCmd); err != nil {
+		t.Skipf("%s not installed", codexCmd)
+	}
+}
+
 func TestPromptPlanDescription(t *testing.T) {
 	colors := testColors()
 
@@ -106,6 +122,7 @@ func TestDetermineMode(t *testing.T) {
 		{name: "review_flag", opts: opts{Review: true}, expected: processor.ModeReview},
 		{name: "codex_only_flag", opts: opts{CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "external_only_flag", opts: opts{ExternalOnly: true}, expected: processor.ModeCodexOnly},
+		{name: "codex_primary_keeps_mode_selection", opts: opts{CodexPrimary: true}, expected: processor.ModeFull},
 		{name: "both_external_and_codex_flags", opts: opts{ExternalOnly: true, CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "codex_only_takes_precedence_over_review", opts: opts{Review: true, CodexOnly: true}, expected: processor.ModeCodexOnly},
 		{name: "external_only_takes_precedence_over_review", opts: opts{Review: true, ExternalOnly: true}, expected: processor.ModeCodexOnly},
@@ -183,8 +200,8 @@ func TestPlanFlagConflict(t *testing.T) {
 
 func TestPlanModeIntegration(t *testing.T) {
 	t.Run("plan_mode_requires_git_repo", func(t *testing.T) {
-		// skip if configured claude command is not installed
-		skipIfClaudeNotAvailable(t)
+		// skip if configured codex command is not installed
+		skipIfCodexNotAvailable(t)
 
 		// run from a non-git directory
 		tmpDir := t.TempDir()
@@ -223,8 +240,8 @@ func TestPlanModeIntegration(t *testing.T) {
 	})
 
 	t.Run("plan_mode_progress_file_naming", func(t *testing.T) {
-		// skip if configured claude command is not installed
-		skipIfClaudeNotAvailable(t)
+		// skip if configured codex command is not installed
+		skipIfCodexNotAvailable(t)
 
 		// test that progress filename is generated correctly for plan mode
 		// the actual file creation is tested by the integration test with real runner
@@ -385,6 +402,23 @@ func TestCheckClaudeDep(t *testing.T) {
 	})
 }
 
+func TestCheckCodexDep(t *testing.T) {
+	t.Run("uses_configured_command", func(t *testing.T) {
+		cfg := &config.Config{CodexCommand: "nonexistent-codex-12345"}
+		err := checkCodexDep(cfg)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "nonexistent-codex-12345")
+	})
+
+	t.Run("falls_back_to_codex_when_empty", func(t *testing.T) {
+		cfg := &config.Config{CodexCommand: ""}
+		err := checkCodexDep(cfg)
+		if err != nil {
+			assert.Contains(t, err.Error(), "codex")
+		}
+	})
+}
+
 func TestCreateRunner(t *testing.T) {
 	t.Run("creates_runner_without_panic", func(t *testing.T) {
 		tmpDir := t.TempDir()
@@ -425,6 +459,34 @@ func TestCreateRunner(t *testing.T) {
 
 		// tests that codex-only mode code path runs without panic
 		req := executePlanRequest{Mode: processor.ModeCodexOnly, Config: cfg, DefaultBranch: "main"}
+		runner := createRunner(req, o, log, holder)
+		assert.NotNil(t, runner)
+	})
+
+	t.Run("codex_primary_mode_creates_runner_without_panic", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		oldWd, wdErr := os.Getwd()
+		require.NoError(t, wdErr)
+		require.NoError(t, os.Chdir(tmpDir))
+		t.Cleanup(func() { _ = os.Chdir(oldWd) })
+
+		cfg := &config.Config{
+			CodexEnabled:            false,
+			CodexReasoningEffort:    "medium",
+			ReviewFirstPrompt:       "default first review",
+			ReviewSecondPrompt:      "default second review",
+			ReviewFirstCodexPrompt:  "codex first review",
+			ReviewSecondCodexPrompt: "codex second review",
+		}
+		o := opts{MaxIterations: 50, CodexPrimary: true}
+
+		colors := testColors()
+		holder := &status.PhaseHolder{}
+		log, err := progress.NewLogger(progress.Config{PlanFile: "", Mode: "full", Branch: "test", NoColor: true}, colors, holder)
+		require.NoError(t, err)
+		defer log.Close()
+
+		req := executePlanRequest{PlanFile: "/path/to/plan.md", Mode: processor.ModeFull, Config: cfg, DefaultBranch: "main"}
 		runner := createRunner(req, o, log, holder)
 		assert.NotNil(t, runner)
 	})
@@ -475,6 +537,100 @@ func TestCreateRunner(t *testing.T) {
 		runner := createRunner(req, o, log, holder)
 		assert.NotNil(t, runner)
 		// behavioral verification is in runner_test.go
+	})
+}
+
+func TestNormalizeCodexOverrides(t *testing.T) {
+	t.Run("normalizes_model_and_thinking", func(t *testing.T) {
+		o := opts{CodexModel: "  gpt-5.4  ", CodexThinking: "  HIGH  "}
+
+		err := normalizeCodexOverrides(&o)
+		require.NoError(t, err)
+		assert.Equal(t, "gpt-5.4", o.CodexModel)
+		assert.Equal(t, "high", o.CodexThinking)
+	})
+
+	t.Run("accepts_empty_thinking", func(t *testing.T) {
+		o := opts{CodexModel: "  gpt-5.4  "}
+
+		err := normalizeCodexOverrides(&o)
+		require.NoError(t, err)
+		assert.Equal(t, "gpt-5.4", o.CodexModel)
+		assert.Empty(t, o.CodexThinking)
+	})
+
+	t.Run("returns_error_for_invalid_thinking", func(t *testing.T) {
+		o := opts{CodexThinking: "turbo"}
+
+		err := normalizeCodexOverrides(&o)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid --codex-thinking")
+	})
+}
+
+func TestResolveAppConfig(t *testing.T) {
+	base := &config.Config{CodexModel: "gpt-5.4"}
+
+	t.Run("returns_original_pointer_without_overrides", func(t *testing.T) {
+		resolved := resolveAppConfig(base, opts{})
+		assert.Same(t, base, resolved)
+	})
+
+	t.Run("clones_for_model_override", func(t *testing.T) {
+		resolved := resolveAppConfig(base, opts{CodexModel: "gpt-5.3-codex-mini"})
+
+		assert.Equal(t, "gpt-5.3-codex-mini", resolved.CodexModel)
+		assert.Equal(t, "gpt-5.4", base.CodexModel)
+		assert.NotSame(t, base, resolved)
+	})
+}
+
+func TestResolvePlanAppConfig(t *testing.T) {
+	t.Run("upgrades_read_only_or_empty_sandbox_to_workspace_write", func(t *testing.T) {
+		readOnly := resolvePlanAppConfig(&config.Config{CodexSandbox: "read-only"}, opts{})
+		require.NotNil(t, readOnly)
+		assert.Equal(t, "workspace-write", readOnly.CodexSandbox)
+
+		empty := resolvePlanAppConfig(&config.Config{}, opts{})
+		require.NotNil(t, empty)
+		assert.Equal(t, "workspace-write", empty.CodexSandbox)
+	})
+
+	t.Run("preserves_writable_sandbox_and_model_override", func(t *testing.T) {
+		base := &config.Config{CodexSandbox: "danger-full-access", CodexModel: "gpt-5.4"}
+		resolved := resolvePlanAppConfig(base, opts{CodexModel: "gpt-5.3-codex"})
+		require.NotNil(t, resolved)
+		assert.Equal(t, "danger-full-access", resolved.CodexSandbox)
+		assert.Equal(t, "gpt-5.3-codex", resolved.CodexModel)
+		assert.Equal(t, "gpt-5.4", base.CodexModel)
+	})
+
+	t.Run("returns_nil_for_nil_input", func(t *testing.T) {
+		assert.Nil(t, resolvePlanAppConfig(nil, opts{}))
+	})
+}
+
+func TestResolveCodexReasoning(t *testing.T) {
+	cfg := &config.Config{CodexReasoningEffort: "medium"}
+
+	t.Run("primary_uses_cli_override", func(t *testing.T) {
+		assert.Equal(t, "high", resolvePrimaryCodexReasoning(processor.ModeFull, cfg, opts{CodexThinking: "high"}))
+	})
+
+	t.Run("primary_uses_plan_default", func(t *testing.T) {
+		assert.Equal(t, "xhigh", resolvePrimaryCodexReasoning(processor.ModePlan, cfg, opts{}))
+	})
+
+	t.Run("primary_uses_config_for_normal_runs", func(t *testing.T) {
+		assert.Equal(t, "medium", resolvePrimaryCodexReasoning(processor.ModeFull, cfg, opts{}))
+	})
+
+	t.Run("review_defaults_to_xhigh", func(t *testing.T) {
+		assert.Equal(t, "xhigh", resolveReviewCodexReasoning(opts{}))
+	})
+
+	t.Run("review_uses_cli_override", func(t *testing.T) {
+		assert.Equal(t, "low", resolveReviewCodexReasoning(opts{CodexThinking: "low"}))
 	})
 }
 

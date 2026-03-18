@@ -173,6 +173,38 @@ func TestRunner_replacePromptVariables_CustomReviewSecondPrompt(t *testing.T) {
 	assert.Equal(t, "Custom second review for implementation of plan at docs/plans/test.md", prompt)
 }
 
+func TestRunner_buildFirstReviewPrompt_CodexPrimary(t *testing.T) {
+	appCfg := &config.Config{
+		ReviewFirstPrompt:      "default first review",
+		ReviewFirstCodexPrompt: "codex first review for {{GOAL}}",
+	}
+	r := &Runner{cfg: Config{PlanFile: "docs/plans/test.md", AppConfig: appCfg, UseCodexForPrimary: true}}
+	prompt := r.buildFirstReviewPrompt()
+
+	assert.Equal(t, "codex first review for implementation of plan at docs/plans/test.md", prompt)
+}
+
+func TestRunner_buildFirstReviewPrompt_FallbackToDefault(t *testing.T) {
+	appCfg := &config.Config{
+		ReviewFirstPrompt: "default first review for {{GOAL}}",
+	}
+	r := &Runner{cfg: Config{PlanFile: "docs/plans/test.md", AppConfig: appCfg, UseCodexForPrimary: true}}
+	prompt := r.buildFirstReviewPrompt()
+
+	assert.Equal(t, "default first review for implementation of plan at docs/plans/test.md", prompt)
+}
+
+func TestRunner_buildSecondReviewPrompt_CodexPrimary(t *testing.T) {
+	appCfg := &config.Config{
+		ReviewSecondPrompt:      "default second review",
+		ReviewSecondCodexPrompt: "codex second review for {{GOAL}}",
+	}
+	r := &Runner{cfg: Config{PlanFile: "docs/plans/test.md", AppConfig: appCfg, UseCodexForPrimary: true}}
+	prompt := r.buildSecondReviewPrompt()
+
+	assert.Equal(t, "codex second review for implementation of plan at docs/plans/test.md", prompt)
+}
+
 func TestRunner_buildCodexEvaluationPrompt_CustomPrompt(t *testing.T) {
 	appCfg := &config.Config{
 		CodexPrompt: "Custom codex evaluation with output: {{CODEX_OUTPUT}} for {{GOAL}}",

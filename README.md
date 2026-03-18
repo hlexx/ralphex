@@ -513,6 +513,13 @@ ralphex --review docs/plans/feature.md
 # external-only mode (skip tasks and first review, run only external review loop)
 ralphex --external-only
 
+# codex as primary executor for task and review phases
+# requires codex_sandbox=workspace-write or danger-full-access
+ralphex --codex-primary docs/plans/feature.md
+
+# codex primary with per-run overrides
+ralphex --codex-primary --codex-model gpt-5.4 --codex-thinking high docs/plans/feature.md
+
 # tasks-only mode (run only task phase, skip all reviews)
 ralphex --tasks-only docs/plans/feature.md
 
@@ -548,6 +555,28 @@ ralphex --serve docs/plans/feature.md
 ralphex --serve --port 3000 docs/plans/feature.md
 ```
 
+### Codex Primary
+
+`--codex-primary` keeps the standard ralphex pipeline but runs task and review phases with Codex instead of Claude.
+
+Requirements:
+
+- Codex CLI installed and authenticated
+- `codex_sandbox = workspace-write` or `danger-full-access`
+
+Examples:
+
+```bash
+# full run
+ralphex --codex-primary docs/plans/feature.md
+
+# review-only
+ralphex --codex-primary --review docs/plans/feature.md
+
+# override model/reasoning for this run
+ralphex --codex-primary --codex-model gpt-5.4 --codex-thinking xhigh docs/plans/feature.md
+```
+
 ### Options
 
 | Flag | Description | Default |
@@ -558,6 +587,9 @@ ralphex --serve --port 3000 docs/plans/feature.md
 | `-r, --review` | Skip task execution, run full review pipeline | false |
 | `-e, --external-only` | Skip tasks and first review, run only external review loop | false |
 | `-c, --codex-only` | Alias for `--external-only` (deprecated) | false |
+| `--codex-primary` | Use Codex for task and review phases instead of Claude | false |
+| `--codex-model` | Override Codex model for this run | from config |
+| `--codex-thinking` | Override Codex reasoning effort for this run | from config |
 | `-t, --tasks-only` | Run only task phase, skip all reviews | false |
 | `-b, --base-ref` | Override default branch for review diffs (branch name or commit hash) | auto-detect |
 | `--skip-finalize` | Skip finalize step even if enabled in config | false |
@@ -685,6 +717,8 @@ The entire system is designed for customization - both task execution and review
 **Prompt files** (`~/.config/ralphex/prompts/`):
 - `task.txt` - task execution prompt
 - `review_first.txt` - comprehensive review (default: 5 language-agnostic agents - quality, implementation, testing, simplification, documentation; customizable)
+- `review_first_codex.txt` - comprehensive review prompt for `--codex-primary`
+- `review_second_codex.txt` - final review prompt for `--codex-primary`
 - `codex.txt` - codex evaluation prompt (Claude evaluates codex output)
 - `codex_review.txt` - codex review prompt (sent to codex external review tool)
 - `custom_review.txt` - custom external review prompt (sent to custom review script)
@@ -742,6 +776,8 @@ ralphex uses a configuration directory at `~/.config/ralphex/` (override with `-
 │   ├── task.txt
 │   ├── review_first.txt
 │   ├── review_second.txt
+│   ├── review_first_codex.txt
+│   ├── review_second_codex.txt
 │   ├── codex.txt
 │   ├── codex_review.txt
 │   ├── custom_review.txt
@@ -789,7 +825,7 @@ Use `--config-dir` or `RALPHEX_CONFIG_DIR` to override the global config locatio
 | `codex_enabled` | Enable codex review phase | `true` |
 | `codex_command` | Codex CLI command | `codex` |
 | `codex_model` | Codex model ID | `gpt-5.4` |
-| `codex_reasoning_effort` | Reasoning effort level | `xhigh` |
+| `codex_reasoning_effort` | Default reasoning effort for Codex task execution | `medium` |
 | `codex_timeout_ms` | Codex timeout in ms | `3600000` |
 | `codex_sandbox` | Sandbox mode | `read-only` |
 | `external_review_tool` | External review tool (`codex`, `custom`, `none`) | `codex` |
@@ -820,6 +856,8 @@ Use `--config-dir` or `RALPHEX_CONFIG_DIR` to override the global config locatio
 | `session_timeout` | Per-session timeout for claude (e.g., `30m`, `1h`). Kills hanging sessions | disabled |
 
 Colors use 24-bit RGB (true color), supported natively by all modern terminals (iTerm2, Kitty, Terminal.app, Windows Terminal, GNOME Terminal, Alacritty, Zed, VS Code, etc). Older terminals will degrade gracefully. Use `--no-color` to disable colors entirely.
+
+Codex review loops and interactive planning use `xhigh` reasoning by default. `--codex-thinking` overrides the reasoning effort for all Codex invocations in the current run.
 
 Error patterns use case-insensitive substring matching. When a pattern is detected in claude or codex output, ralphex exits gracefully with an informative message suggesting how to check usage/status. Multiple patterns are separated by commas, with whitespace trimmed from each pattern.
 

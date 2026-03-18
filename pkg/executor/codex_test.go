@@ -840,6 +840,27 @@ func TestCodexExecutor_Run_ErrorPattern_WithSignal(t *testing.T) {
 	assert.Equal(t, "<<<RALPHEX:CODEX_REVIEW_DONE>>>", result.Signal)
 }
 
+func TestCodexExecutor_Run_ErrorPatternFromStderrTail(t *testing.T) {
+	mock := &mockCodexRunner{
+		runFunc: func(_ context.Context, _ string, _ ...string) (CodexStreams, func() error, error) {
+			stderr := "--------\nworkdir: /tmp/test\n--------\nrequest failed\nquota exceeded for project\n"
+			return mockStreams(stderr, "partial output"), mockWaitError(errors.New("exit status 1")), nil
+		},
+	}
+	e := &CodexExecutor{
+		runner:        mock,
+		ErrorPatterns: []string{"quota exceeded"},
+	}
+
+	result := e.Run(context.Background(), "analyze code")
+
+	require.Error(t, result.Error)
+	var patternErr *PatternMatchError
+	require.ErrorAs(t, result.Error, &patternErr)
+	assert.Equal(t, "quota exceeded", patternErr.Pattern)
+	assert.Equal(t, "partial output", result.Output)
+}
+
 func TestCodexExecutor_Run_LimitPattern(t *testing.T) {
 	exitErr := errors.New("exit status 1")
 	tests := []struct {

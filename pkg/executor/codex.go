@@ -181,8 +181,13 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 	// (e.g., reviewing code that handles rate limits).
 	// skip pattern checks on context cancellation — cancellation must propagate as-is.
 	if finalErr != nil && ctx.Err() == nil {
+		patternInput := stdoutContent
+		if len(stderrRes.lastLines) > 0 {
+			patternInput += "\n" + strings.Join(stderrRes.lastLines, "\n")
+		}
+
 		// check limit patterns first (higher priority)
-		if pattern := matchPattern(stdoutContent, e.LimitPatterns); pattern != "" {
+		if pattern := matchPattern(patternInput, e.LimitPatterns); pattern != "" {
 			return Result{
 				Output: stdoutContent,
 				Signal: signal,
@@ -191,7 +196,7 @@ func (e *CodexExecutor) Run(ctx context.Context, prompt string) Result {
 		}
 
 		// check for error patterns in output
-		if pattern := matchPattern(stdoutContent, e.ErrorPatterns); pattern != "" {
+		if pattern := matchPattern(patternInput, e.ErrorPatterns); pattern != "" {
 			return Result{
 				Output: stdoutContent,
 				Signal: signal,

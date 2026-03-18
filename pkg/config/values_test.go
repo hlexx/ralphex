@@ -55,7 +55,7 @@ func TestValuesLoader_Load_EmbeddedOnly(t *testing.T) {
 	assert.True(t, values.CodexEnabledSet)
 	assert.Equal(t, "codex", values.CodexCommand)
 	assert.Equal(t, "gpt-5.4", values.CodexModel)
-	assert.Equal(t, "xhigh", values.CodexReasoningEffort)
+	assert.Equal(t, "medium", values.CodexReasoningEffort)
 	assert.Equal(t, 3600000, values.CodexTimeoutMs)
 	assert.Equal(t, "read-only", values.CodexSandbox)
 	assert.Equal(t, "codex", values.ExternalReviewTool)

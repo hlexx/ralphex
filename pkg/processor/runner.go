@@ -53,6 +53,9 @@ type Config struct {
 	IterationDelayMs      int            // delay between iterations in milliseconds
 	TaskRetryCount        int            // number of times to retry failed tasks
 	CodexEnabled          bool           // whether codex review is enabled
+	UseCodexForPrimary    bool           // whether to run task/review/planning phases with codex
+	PrimaryCodexReasoning string         // reasoning effort for codex when used as the primary executor
+	ReviewCodexReasoning  string         // reasoning effort for codex external review iterations
 	FinalizeEnabled       bool           // whether finalize step is enabled
 	DefaultBranch         string         // default branch name (detected from repo)
 	AppConfig             *config.Config // full application config (for executors and prompts)
@@ -133,22 +136,9 @@ func New(cfg Config, log Logger, holder *status.PhaseHolder) *Runner {
 		claudeExec.LimitPatterns = cfg.AppConfig.ClaudeLimitPatterns
 	}
 
-	// build codex executor with config values
-	codexExec := &executor.CodexExecutor{
-		OutputHandler: func(text string) {
-			log.PrintAligned(text)
-		},
-		Debug: cfg.Debug,
-	}
-	if cfg.AppConfig != nil {
-		codexExec.Command = cfg.AppConfig.CodexCommand
-		codexExec.Model = cfg.AppConfig.CodexModel
-		codexExec.ReasoningEffort = cfg.AppConfig.CodexReasoningEffort
-		codexExec.TimeoutMs = cfg.AppConfig.CodexTimeoutMs
-		codexExec.Sandbox = cfg.AppConfig.CodexSandbox
-		codexExec.ErrorPatterns = cfg.AppConfig.CodexErrorPatterns
-		codexExec.LimitPatterns = cfg.AppConfig.CodexLimitPatterns
-	}
+	// build codex executors with phase-specific reasoning defaults
+	codexPrimaryExec := newCodexExecutor(cfg, log, cfg.PrimaryCodexReasoning)
+	codexReviewExec := newCodexExecutor(cfg, log, cfg.ReviewCodexReasoning)
 
 	// build custom executor if custom review script is configured
 	var customExec *executor.CustomExecutor
@@ -166,7 +156,7 @@ func New(cfg Config, log Logger, holder *status.PhaseHolder) *Runner {
 	// auto-disable codex if the binary is not installed AND we need codex
 	// (skip this check if using custom external review tool or external review is disabled)
 	if cfg.CodexEnabled && needsCodexBinary(cfg.AppConfig) {
-		codexCmd := codexExec.Command
+		codexCmd := codexReviewExec.Command
 		if codexCmd == "" {
 			codexCmd = "codex"
 		}
@@ -176,7 +166,31 @@ func New(cfg Config, log Logger, holder *status.PhaseHolder) *Runner {
 		}
 	}
 
-	return NewWithExecutors(cfg, log, Executors{Claude: claudeExec, Codex: codexExec, Custom: customExec}, holder)
+	primaryExec := Executor(claudeExec)
+	if cfg.UseCodexForPrimary {
+		primaryExec = codexPrimaryExec
+	}
+
+	return NewWithExecutors(cfg, log, Executors{Claude: primaryExec, Codex: codexReviewExec, Custom: customExec}, holder)
+}
+
+func newCodexExecutor(cfg Config, log Logger, reasoning string) *executor.CodexExecutor {
+	codexExec := &executor.CodexExecutor{
+		OutputHandler: func(text string) {
+			log.PrintAligned(text)
+		},
+		Debug: cfg.Debug,
+	}
+	if cfg.AppConfig != nil {
+		codexExec.Command = cfg.AppConfig.CodexCommand
+		codexExec.Model = cfg.AppConfig.CodexModel
+		codexExec.ReasoningEffort = reasoning
+		codexExec.TimeoutMs = cfg.AppConfig.CodexTimeoutMs
+		codexExec.Sandbox = cfg.AppConfig.CodexSandbox
+		codexExec.ErrorPatterns = cfg.AppConfig.CodexErrorPatterns
+		codexExec.LimitPatterns = cfg.AppConfig.CodexLimitPatterns
+	}
+	return codexExec
 }
 
 // NewWithExecutors creates a new Runner with custom executors (for testing).
@@ -267,7 +281,7 @@ func (r *Runner) runFull(ctx context.Context) error {
 	r.phaseHolder.Set(status.PhaseReview)
 	r.log.PrintSection(status.NewGenericSection("claude review 0: all findings"))
 
-	if err := r.runClaudeReview(ctx, r.replacePromptVariables(r.cfg.AppConfig.ReviewFirstPrompt)); err != nil {
+	if err := r.runClaudeReview(ctx, r.buildFirstReviewPrompt()); err != nil {
 		return fmt.Errorf("first review: %w", err)
 	}
 
@@ -291,7 +305,7 @@ func (r *Runner) runReviewOnly(ctx context.Context) error {
 	r.phaseHolder.Set(status.PhaseReview)
 	r.log.PrintSection(status.NewGenericSection("claude review 0: all findings"))
 
-	if err := r.runClaudeReview(ctx, r.replacePromptVariables(r.cfg.AppConfig.ReviewFirstPrompt)); err != nil {
+	if err := r.runClaudeReview(ctx, r.buildFirstReviewPrompt()); err != nil {
 		return fmt.Errorf("first review: %w", err)
 	}
 
@@ -474,7 +488,7 @@ func (r *Runner) runClaudeReviewLoop(ctx context.Context, promptPrefix ...string
 		headBefore := r.headHash()
 
 		result := r.runWithLimitRetry(ctx, r.claude.Run,
-			prefix+r.replacePromptVariables(r.cfg.AppConfig.ReviewSecondPrompt), "claude")
+			prefix+r.buildSecondReviewPrompt(), "claude")
 		if result.Error != nil {
 			if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
 				return err

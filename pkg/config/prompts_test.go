@@ -24,6 +24,8 @@ func TestPromptLoader_Load_FromUserDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "task.txt"), []byte("custom task prompt"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_first.txt"), []byte("custom first review"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_second.txt"), []byte("custom second review"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_first_codex.txt"), []byte("custom first codex review"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "review_second_codex.txt"), []byte("custom second codex review"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "codex.txt"), []byte("custom codex prompt"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "make_plan.txt"), []byte("custom make plan prompt"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "finalize.txt"), []byte("custom finalize prompt"), 0o600))
@@ -38,6 +40,8 @@ func TestPromptLoader_Load_FromUserDir(t *testing.T) {
 	assert.Equal(t, "custom task prompt", prompts.Task)
 	assert.Equal(t, "custom first review", prompts.ReviewFirst)
 	assert.Equal(t, "custom second review", prompts.ReviewSecond)
+	assert.Equal(t, "custom first codex review", prompts.ReviewFirstCodex)
+	assert.Equal(t, "custom second codex review", prompts.ReviewSecondCodex)
 	assert.Equal(t, "custom codex prompt", prompts.Codex)
 	assert.Equal(t, "custom make plan prompt", prompts.MakePlan)
 	assert.Equal(t, "custom finalize prompt", prompts.Finalize)
@@ -60,6 +64,8 @@ func TestPromptLoader_Load_PartialUserFiles(t *testing.T) {
 	assert.Equal(t, "user task prompt", prompts.Task)
 	// other prompts should fall back to embedded
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewSecondCodex, "{{GOAL}}")
 }
 
 func TestPromptLoader_Load_NoUserDir(t *testing.T) {
@@ -73,6 +79,7 @@ func TestPromptLoader_Load_NoUserDir(t *testing.T) {
 	// should fall back to embedded defaults
 	assert.Contains(t, prompts.Task, "{{PLAN_FILE}}")
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
 	assert.Contains(t, prompts.MakePlan, "{{PLAN_DESCRIPTION}}")
 }
 
@@ -138,6 +145,8 @@ func TestPromptLoader_Load_LocalFallbackToEmbedded(t *testing.T) {
 	// embedded defaults used for missing prompts (both local and global)
 	assert.Contains(t, prompts.ReviewFirst, "{{GOAL}}")
 	assert.Contains(t, prompts.ReviewSecond, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewFirstCodex, "{{GOAL}}")
+	assert.Contains(t, prompts.ReviewSecondCodex, "{{GOAL}}")
 	assert.Contains(t, prompts.Codex, "{{CODEX_OUTPUT}}")
 }
 
