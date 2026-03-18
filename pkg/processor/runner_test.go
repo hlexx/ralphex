@@ -3042,6 +3042,44 @@ func TestRunner_SessionTimeout_NonClaudeToolNotAffected(t *testing.T) {
 	assert.False(t, hasDeadline, "codex tool should not have deadline from session timeout")
 }
 
+func TestRunner_SessionTimeout_CodexPrimaryTaskPhaseNotAffected(t *testing.T) {
+	tmpDir := t.TempDir()
+	planFile := filepath.Join(tmpDir, "plan.md")
+	require.NoError(t, os.WriteFile(planFile, []byte("# Plan\n### Task 1: test\n- [ ] do work"), 0o600))
+
+	log := newMockLogger("progress.txt")
+	codex := newMockExecutor(nil)
+
+	var hasDeadline bool
+	primaryExec := &mocks.ExecutorMock{
+		RunFunc: func(ctx context.Context, _ string) executor.Result {
+			_, hasDeadline = ctx.Deadline()
+			return executor.Result{Output: "still working"}
+		},
+	}
+
+	appCfg := testAppConfig(t)
+	appCfg.SessionTimeout = 50 * time.Millisecond
+	appCfg.SessionTimeoutSet = true
+
+	cfg := processor.Config{
+		Mode:               processor.ModeTasksOnly,
+		PlanFile:           planFile,
+		MaxIterations:      1,
+		UseCodexForPrimary: true,
+		AppConfig:          appCfg,
+	}
+	r := processor.NewWithExecutors(cfg, log, processor.Executors{Claude: primaryExec, Codex: codex}, &status.PhaseHolder{})
+	err := r.Run(t.Context())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "max iterations")
+	assert.False(t, hasDeadline, "codex-primary task executor should not receive claude session timeout")
+	for _, call := range log.PrintCalls() {
+		assert.NotContains(t, call.Format, "session timed out", "codex-primary task phase should not log claude timeout")
+	}
+}
+
 func TestRunner_SessionTimeout_ReviewPhaseContinues(t *testing.T) {
 	tmpDir := t.TempDir()
 	planFile := filepath.Join(tmpDir, "plan.md")
@@ -3210,7 +3248,7 @@ func TestRunner_SessionTimeout_ExternalReviewLoopSkipsStalemateOnTimeout(t *test
 	// verify timeout retry was logged (not stalemate)
 	var foundTimeout, foundStalemate bool
 	for _, call := range log.PrintCalls() {
-		if strings.Contains(call.Format, "claude eval session timed out") {
+		if strings.Contains(call.Format, "eval session timed out") {
 			foundTimeout = true
 		}
 		if strings.Contains(call.Format, "stalemate detected") {

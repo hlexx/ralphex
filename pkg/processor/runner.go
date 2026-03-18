@@ -383,11 +383,19 @@ func (r *Runner) runTasksOnly(ctx context.Context) error {
 	return nil
 }
 
+func (r *Runner) primaryToolName() string {
+	if r.cfg.UseCodexForPrimary {
+		return "codex"
+	}
+	return "claude"
+}
+
 // runTaskPhase executes tasks until completion or max iterations.
 // executes ONE Task section per iteration.
 func (r *Runner) runTaskPhase(ctx context.Context) error {
 	prompt := r.replacePromptVariables(r.cfg.AppConfig.TaskPrompt)
 	retryCount := 0
+	toolName := r.primaryToolName()
 
 	for i := 1; i <= r.cfg.MaxIterations; i++ {
 		select {
@@ -403,12 +411,12 @@ func (r *Runner) runTaskPhase(ctx context.Context) error {
 		}
 		r.log.PrintSection(status.NewTaskIterationSection(taskNum))
 
-		result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, "claude")
+		result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, toolName)
 		if result.Error != nil {
-			if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
+			if err := r.handlePatternMatchError(result.Error, toolName); err != nil {
 				return err
 			}
-			return fmt.Errorf("claude execution: %w", result.Error)
+			return fmt.Errorf("%s execution: %w", toolName, result.Error)
 		}
 
 		if result.Signal == SignalCompleted {
@@ -445,12 +453,13 @@ func (r *Runner) runTaskPhase(ctx context.Context) error {
 
 // runClaudeReview runs Claude review with the given prompt until REVIEW_DONE.
 func (r *Runner) runClaudeReview(ctx context.Context, prompt string) error {
-	result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, "claude")
+	toolName := r.primaryToolName()
+	result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, toolName)
 	if result.Error != nil {
-		if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
+		if err := r.handlePatternMatchError(result.Error, toolName); err != nil {
 			return err
 		}
-		return fmt.Errorf("claude execution: %w", result.Error)
+		return fmt.Errorf("%s execution: %w", toolName, result.Error)
 	}
 
 	if result.Signal == SignalFailed {
@@ -469,6 +478,7 @@ func (r *Runner) runClaudeReview(ctx context.Context, prompt string) error {
 func (r *Runner) runClaudeReviewLoop(ctx context.Context, promptPrefix ...string) error {
 	// review iterations = 10% of max_iterations
 	maxReviewIterations := max(minReviewIterations, r.cfg.MaxIterations/reviewIterationDivisor)
+	toolName := r.primaryToolName()
 
 	prefix := ""
 	if len(promptPrefix) > 0 {
@@ -488,12 +498,12 @@ func (r *Runner) runClaudeReviewLoop(ctx context.Context, promptPrefix ...string
 		headBefore := r.headHash()
 
 		result := r.runWithLimitRetry(ctx, r.claude.Run,
-			prefix+r.buildSecondReviewPrompt(), "claude")
+			prefix+r.buildSecondReviewPrompt(), toolName)
 		if result.Error != nil {
-			if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
+			if err := r.handlePatternMatchError(result.Error, toolName); err != nil {
 				return err
 			}
-			return fmt.Errorf("claude execution: %w", result.Error)
+			return fmt.Errorf("%s execution: %w", toolName, result.Error)
 		}
 
 		if result.Signal == SignalFailed {
@@ -501,21 +511,21 @@ func (r *Runner) runClaudeReviewLoop(ctx context.Context, promptPrefix ...string
 		}
 
 		if isReviewDone(result.Signal) {
-			r.log.Print("claude review complete - no more findings")
+			r.log.Print("%s review complete - no more findings", toolName)
 			return nil
 		}
 
 		// on session timeout, skip HEAD check and retry; the session was killed before
 		// it could finish, so "no changes" doesn't mean "nothing to fix"
 		if r.lastSessionTimedOut {
-			r.log.Print("session timed out, retrying review iteration...")
+			r.log.Print("%s session timed out, retrying review iteration...", toolName)
 			continue
 		}
 
 		// fallback: if HEAD hash hasn't changed, claude found nothing to fix
 		if headBefore != "" {
 			if headAfter := r.headHash(); headAfter == headBefore {
-				r.log.Print("claude review complete - no changes detected")
+				r.log.Print("%s review complete - no changes detected", toolName)
 				return nil
 			}
 		}
@@ -526,7 +536,7 @@ func (r *Runner) runClaudeReviewLoop(ctx context.Context, promptPrefix ...string
 		}
 	}
 
-	r.log.Print("max claude review iterations reached, continuing...")
+	r.log.Print("max %s review iterations reached, continuing...", toolName)
 	return nil
 }
 
@@ -716,7 +726,8 @@ func (r *Runner) runExternalReviewLoop(ctx context.Context, cfg externalReviewCo
 		// pass output to claude for evaluation and fixing
 		r.phaseHolder.Set(status.PhaseClaudeEval)
 		r.log.PrintSection(status.NewClaudeEvalSection())
-		claudeResult := r.runWithLimitRetry(loopCtx, r.claude.Run, cfg.buildEvalPrompt(reviewResult.Output), "claude")
+		evalToolName := r.primaryToolName()
+		claudeResult := r.runWithLimitRetry(loopCtx, r.claude.Run, cfg.buildEvalPrompt(reviewResult.Output), evalToolName)
 
 		// restore codex phase for next iteration
 		r.phaseHolder.Set(status.PhaseCodex)
@@ -725,17 +736,17 @@ func (r *Runner) runExternalReviewLoop(ctx context.Context, cfg externalReviewCo
 				r.log.Print("manual break requested, external review terminated early")
 				return nil
 			}
-			if err := r.handlePatternMatchError(claudeResult.Error, "claude"); err != nil {
+			if err := r.handlePatternMatchError(claudeResult.Error, evalToolName); err != nil {
 				return err
 			}
-			return fmt.Errorf("claude execution: %w", claudeResult.Error)
+			return fmt.Errorf("%s execution: %w", evalToolName, claudeResult.Error)
 		}
 
 		// on session timeout, skip response capture and stalemate detection; the session was killed
 		// before it could finish, so partial output can't be trusted as previous context and
 		// "no changes" doesn't mean "nothing to fix"
 		if r.lastSessionTimedOut {
-			r.log.Print("claude eval session timed out, retrying %s iteration...", cfg.name)
+			r.log.Print("%s eval session timed out, retrying %s iteration...", evalToolName, cfg.name)
 			continue
 		}
 
@@ -1001,12 +1012,13 @@ func (r *Runner) runPlanCreation(ctx context.Context) error {
 			prompt = fmt.Sprintf("%s\n\n---\nPREVIOUS DRAFT FEEDBACK:\nUser requested revisions with this feedback:\n%s\n\nPlease revise the plan accordingly and present a new PLAN_DRAFT.", prompt, lastRevisionFeedback)
 		}
 
-		result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, "claude")
+		toolName := r.primaryToolName()
+		result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, toolName)
 		if result.Error != nil {
-			if err := r.handlePatternMatchError(result.Error, "claude"); err != nil {
+			if err := r.handlePatternMatchError(result.Error, toolName); err != nil {
 				return err
 			}
-			return fmt.Errorf("claude execution: %w", result.Error)
+			return fmt.Errorf("%s execution: %w", toolName, result.Error)
 		}
 
 		if result.Signal == SignalFailed {
@@ -1023,7 +1035,7 @@ func (r *Runner) runPlanCreation(ctx context.Context) error {
 		// it could finish, so partial output may contain truncated PLAN_DRAFT or QUESTION markers.
 		// preserve lastRevisionFeedback so the next attempt re-sends the user's revision request
 		if r.lastSessionTimedOut {
-			r.log.Print("plan creation session timed out, retrying iteration...")
+			r.log.Print("%s plan creation session timed out, retrying iteration...", toolName)
 			if err := r.sleepWithContext(ctx, r.iterationDelay); err != nil {
 				return fmt.Errorf("interrupted: %w", err)
 			}
@@ -1174,7 +1186,8 @@ func (r *Runner) runFinalize(ctx context.Context) error {
 	r.log.PrintSection(status.NewGenericSection("finalize step"))
 
 	prompt := r.replacePromptVariables(r.cfg.AppConfig.FinalizePrompt)
-	result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, "claude")
+	toolName := r.primaryToolName()
+	result := r.runWithLimitRetry(ctx, r.claude.Run, prompt, toolName)
 
 	if result.Error != nil {
 		// propagate context cancellation - user wants to abort
@@ -1182,7 +1195,7 @@ func (r *Runner) runFinalize(ctx context.Context) error {
 			return fmt.Errorf("finalize step: %w", result.Error)
 		}
 		// pattern match (rate limit or error) - log via shared helper, but don't fail (best-effort)
-		if r.handlePatternMatchError(result.Error, "claude") != nil {
+		if r.handlePatternMatchError(result.Error, toolName) != nil {
 			return nil //nolint:nilerr // intentional: best-effort semantics, log but don't propagate
 		}
 		// best-effort: log error but don't fail
