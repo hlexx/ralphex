@@ -56,8 +56,8 @@ github.com/deckarep/golang-set/v2
 ## explicit; go 1.13
 github.com/dlclark/regexp2
 github.com/dlclark/regexp2/syntax
-# github.com/fatih/color v1.18.0
-## explicit; go 1.17
+# github.com/fatih/color v1.19.0
+## explicit; go 1.25.0
 github.com/fatih/color
 # github.com/fsnotify/fsnotify v1.9.0
 ## explicit; go 1.17
@@ -171,8 +171,8 @@ github.com/yuin/goldmark-emoji/definition
 ## explicit; go 1.24.0
 golang.org/x/net/html
 golang.org/x/net/html/atom
-# golang.org/x/sys v0.41.0
-## explicit; go 1.24.0
+# golang.org/x/sys v0.42.0
+## explicit; go 1.25.0
 golang.org/x/sys/plan9
 golang.org/x/sys/unix
 golang.org/x/sys/windows
